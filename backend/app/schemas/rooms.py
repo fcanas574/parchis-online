@@ -7,7 +7,7 @@ PlayerCount = Literal[4, 5, 6]
 
 
 class WireModel(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
 class CreateRoomRequest(WireModel):

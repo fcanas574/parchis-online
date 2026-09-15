@@ -35,8 +35,19 @@
     "playerReconnected": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_RECONNECTED" }, "payload": { "type": "object", "additionalProperties": false, "required": ["player"], "properties": { "player": { "$ref": "#/$defs/player" } } } } },
     "playerReady": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_READY" }, "payload": { "type": "object", "additionalProperties": false, "required": ["playerId", "ready"], "properties": { "playerId": { "type": "string" }, "ready": { "type": "boolean" } } } } },
     "gameStarted": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "GAME_STARTED" }, "payload": { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "playing" } } } } },
-    "gameStateSync": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "GAME_STATE_SYNC" }, "payload": { "type": "object", "additionalProperties": false, "required": ["room"], "properties": { "room": { "type": "object" } } } } },
+    "gameStateSync": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "GAME_STATE_SYNC" }, "payload": { "type": "object", "additionalProperties": false, "required": ["room"], "properties": { "room": { "oneOf": [ { "type": "object", "maxProperties": 0 }, { "$ref": "#/$defs/publicRoom" } ] } } } } },
     "error": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "ERROR" }, "requestId": { "type": "string", "minLength": 1, "maxLength": 64 }, "payload": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } } } },
+    "publicRoom": {
+      "type": "object", "additionalProperties": false,
+      "required": ["roomCode", "status", "maxPlayers", "hostPlayerId", "players", "stateVersion"],
+      "properties": {
+        "roomCode": { "$ref": "#/$defs/roomCode" },
+        "status": { "enum": ["lobby", "playing", "finished"] },
+        "maxPlayers": { "enum": [4, 5, 6] }, "hostPlayerId": { "type": "string" },
+        "players": { "type": "array", "items": { "$ref": "#/$defs/player" } },
+        "stateVersion": { "type": "integer", "minimum": 0 }
+      }
+    },
     "envelope": {
       "type": "object", "additionalProperties": false,
       "required": ["type", "version", "roomCode", "eventId", "serverTime", "stateVersion", "payload"],

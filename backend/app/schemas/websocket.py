@@ -1,26 +1,26 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from .rooms import PlayerColor
 
 
 class WireModel(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
 class ReconnectCommand(WireModel):
     type: Literal["RECONNECT"]
     version: Literal[1] = 1
-    room_code: str = Field(alias="roomCode")
+    room_code: str = Field(alias="roomCode", pattern=r"^[A-Z2-9]{5}$")
     player_token: str = Field(alias="playerToken", min_length=32, max_length=256)
 
 
 class PlayerReadyCommand(WireModel):
     type: Literal["PLAYER_READY"]
     version: Literal[1] = 1
-    ready: bool
+    ready: StrictBool
     request_id: str = Field(alias="requestId", min_length=1, max_length=64)
 
 
