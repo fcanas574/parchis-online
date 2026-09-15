@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parchis-online.example/contracts/v1/protocol.schema.json",
+  "title": "Parchís Online v1 client protocol",
+  "oneOf": [
+    { "$ref": "#/$defs/reconnect" },
+    { "$ref": "#/$defs/playerReady" },
+    { "$ref": "#/$defs/startGame" }
+  ],
+  "$defs": {
+    "roomCode": { "type": "string", "pattern": "^[A-Z2-9]{5}$" },
+    "requestId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "reconnect": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "version", "roomCode", "playerToken"],
+      "properties": {
+        "type": { "const": "RECONNECT" }, "version": { "const": 1 },
+        "roomCode": { "$ref": "#/$defs/roomCode" },
+        "playerToken": { "type": "string", "minLength": 32, "maxLength": 256 }
+      }
+    },
+    "playerReady": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "version", "ready", "requestId"],
+      "properties": {
+        "type": { "const": "PLAYER_READY" }, "version": { "const": 1 },
+        "ready": { "type": "boolean" }, "requestId": { "$ref": "#/$defs/requestId" }
+      }
+    },
+    "startGame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "version", "requestId"],
+      "properties": {
+        "type": { "const": "START_GAME" }, "version": { "const": 1 },
+        "requestId": { "$ref": "#/$defs/requestId" }
+      }
+    }
+  }
+}

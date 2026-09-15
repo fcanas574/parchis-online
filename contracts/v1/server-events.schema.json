@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parchis-online.example/contracts/v1/server-events.schema.json",
+  "title": "Parchís Online v1 server events",
+  "oneOf": [
+    { "$ref": "#/$defs/playerJoined" }, { "$ref": "#/$defs/playerLeft" },
+    { "$ref": "#/$defs/playerReconnected" }, { "$ref": "#/$defs/playerReady" },
+    { "$ref": "#/$defs/gameStarted" }, { "$ref": "#/$defs/gameStateSync" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "roomCode": { "type": "string", "pattern": "^[A-Z2-9]{5}$" },
+    "base": {
+      "type": "object", "required": ["type", "version", "roomCode", "eventId", "serverTime", "stateVersion", "payload"],
+      "properties": {
+        "version": { "const": 1 }, "roomCode": { "$ref": "#/$defs/roomCode" },
+        "eventId": { "type": "string", "minLength": 1 },
+        "serverTime": { "type": "string", "format": "date-time" },
+        "stateVersion": { "type": "integer", "minimum": 0 }, "requestId": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "player": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "displayName", "color", "seatIndex", "isHost", "isReady", "isConnected", "reservationExpiresAt"],
+      "properties": {
+        "id": { "type": "string" }, "displayName": { "type": "string" },
+        "color": { "enum": ["green", "red", "blue", "yellow", "purple", "orange"] },
+        "seatIndex": { "type": "integer", "minimum": 0 }, "isHost": { "type": "boolean" },
+        "isReady": { "type": "boolean" }, "isConnected": { "type": "boolean" },
+        "reservationExpiresAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "playerJoined": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_JOINED" }, "payload": { "type": "object", "additionalProperties": false, "required": ["player"], "properties": { "player": { "$ref": "#/$defs/player" } } } } },
+    "playerLeft": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_LEFT" }, "payload": { "type": "object", "additionalProperties": false, "required": ["playerId", "reservationExpiresAt"], "properties": { "playerId": { "type": "string" }, "reservationExpiresAt": { "type": "string", "format": "date-time" } } } } },
+    "playerReconnected": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_RECONNECTED" }, "payload": { "type": "object", "additionalProperties": false, "required": ["player"], "properties": { "player": { "$ref": "#/$defs/player" } } } } },
+    "playerReady": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_READY" }, "payload": { "type": "object", "additionalProperties": false, "required": ["playerId", "ready"], "properties": { "playerId": { "type": "string" }, "ready": { "type": "boolean" } } } } },
+    "gameStarted": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "GAME_STARTED" }, "payload": { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "playing" } } } } },
+    "gameStateSync": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "GAME_STATE_SYNC" }, "payload": { "type": "object", "additionalProperties": false, "required": ["room"], "properties": { "room": { "type": "object" } } } } },
+    "error": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "ERROR" }, "requestId": { "type": "string", "minLength": 1, "maxLength": 64 }, "payload": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } } } },
+    "envelope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "version", "roomCode", "eventId", "serverTime", "stateVersion", "payload"],
+      "properties": { "type": { "type": "string" }, "version": { "const": 1 }, "roomCode": { "$ref": "#/$defs/roomCode" }, "eventId": { "type": "string", "minLength": 1 }, "serverTime": { "type": "string", "format": "date-time" }, "stateVersion": { "type": "integer", "minimum": 0 }, "requestId": { "type": "string", "minLength": 1, "maxLength": 64 }, "payload": { "type": "object" } }
+    }
+  }
+}
