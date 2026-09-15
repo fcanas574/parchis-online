@@ -22,6 +22,12 @@ class JoinRoomRequest(WireModel):
 
 
 class RoomCredentials(WireModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+        from_attributes=True,
+    )
+
     room_code: str = Field(alias="roomCode")
     player_id: str = Field(alias="playerId")
     player_token: str = Field(alias="playerToken")

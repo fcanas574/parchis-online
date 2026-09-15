@@ -27,7 +27,7 @@ class SessionIdentity:
     player_id: str
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class RoomChange:
     state: "RoomState"
     event_type: str

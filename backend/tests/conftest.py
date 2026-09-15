@@ -1,5 +1,6 @@
 import sys
 from datetime import UTC, datetime, timedelta
+from itertools import count
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -49,7 +50,7 @@ def code_generator():
 
 @pytest.fixture
 def token_generator():
-    player_tokens = iter(("token-1", "token-2", "token-3"))
+    player_tokens = (f"token-{token_number}" for token_number in count(1))
     return lambda: next(player_tokens)
 
 
