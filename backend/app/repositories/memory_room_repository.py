@@ -1,15 +1,18 @@
 import asyncio
 
 from app.game.models import RoomState
+from app.repositories.room_repository import RoomCodeCollisionError, RoomRepository
 
 
-class MemoryRoomRepository:
+class MemoryRoomRepository(RoomRepository):
     def __init__(self) -> None:
         self._rooms: dict[str, RoomState] = {}
         self._lock = asyncio.Lock()
 
     async def create(self, room: RoomState) -> None:
         async with self._lock:
+            if room.room_code in self._rooms:
+                raise RoomCodeCollisionError(room.room_code)
             self._rooms[room.room_code] = room
 
     async def get(self, room_code: str) -> RoomState | None:
