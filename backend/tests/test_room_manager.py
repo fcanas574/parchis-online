@@ -1,3 +1,5 @@
+import asyncio
+import copy
 from itertools import count
 
 import pytest
@@ -267,6 +269,142 @@ async def test_expired_seat_is_reused_without_displacing_valid_reservation(
     replacement = await room_manager.join_room(host.room_code, "Replacement", None)
     room = await room_manager.get_room(host.room_code)
     assert next(player for player in room.players if player.id == replacement.player_id).seat_index == 0
+
+
+@pytest.mark.parametrize("accessor", ["get_room", "public_room"])
+@pytest.mark.asyncio
+async def test_room_reads_prune_expired_reservations(
+    room_manager,
+    room_repository,
+    clock,
+    accessor,
+):
+    host = await room_manager.create_room("Host", 4, "green")
+    guest = await room_manager.join_room(host.room_code, "Guest", "red")
+    host_session = await room_manager.authenticate(host.room_code, host.player_token)
+    await room_manager.disconnect(host_session)
+    clock.advance(seconds=601)
+
+    result = await getattr(room_manager, accessor)(host.room_code)
+
+    if accessor == "get_room":
+        assert [player.id for player in result.players] == [guest.player_id]
+        assert result.host_player_id == guest.player_id
+    else:
+        assert [player["id"] for player in result["players"]] == [guest.player_id]
+        assert result["hostPlayerId"] == guest.player_id
+    persisted = await room_repository.get(host.room_code)
+    assert [player.id for player in persisted.players] == [guest.player_id]
+
+
+@pytest.mark.parametrize("operation", ["disconnect", "set_ready", "start_game"])
+@pytest.mark.asyncio
+async def test_mutations_reject_expired_player_without_persisting_prune(
+    room_manager,
+    room_repository,
+    clock,
+    operation,
+):
+    host = await room_manager.create_room("Host", 4, "green")
+    session = await room_manager.authenticate(host.room_code, host.player_token)
+    await room_manager.disconnect(session)
+    clock.advance(seconds=601)
+    before = copy.deepcopy(await room_repository.get(host.room_code))
+
+    with pytest.raises(RoomError) as expired:
+        if operation == "disconnect":
+            await room_manager.disconnect(session)
+        elif operation == "set_ready":
+            await room_manager.set_ready(session, True, "expired-ready")
+        else:
+            await room_manager.start_game(session, "expired-start")
+
+    assert expired.value.code == "UNAUTHENTICATED"
+    assert await room_repository.get(host.room_code) == before
+
+
+@pytest.mark.asyncio
+async def test_duplicate_join_does_not_persist_expiry_side_effects(
+    room_manager,
+    room_repository,
+    clock,
+):
+    host = await room_manager.create_room("Host", 4, "green")
+    guest = await room_manager.join_room(host.room_code, "Guest", "red")
+    guest_session = await room_manager.authenticate(guest.room_code, guest.player_token)
+    await room_manager.disconnect(guest_session)
+    clock.advance(seconds=601)
+    before = copy.deepcopy(await room_repository.get(host.room_code))
+
+    with pytest.raises(RoomError) as duplicate:
+        await room_manager.join_room(host.room_code, " host ", "blue")
+
+    assert duplicate.value.code == "INVALID_NAME"
+    assert await room_repository.get(host.room_code) == before
+
+
+@pytest.mark.asyncio
+async def test_invalid_authentication_does_not_persist_expiry_side_effects(
+    room_manager,
+    room_repository,
+    clock,
+):
+    host = await room_manager.create_room("Host", 4, "green")
+    session = await room_manager.authenticate(host.room_code, host.player_token)
+    await room_manager.disconnect(session)
+    clock.advance(seconds=601)
+    before = copy.deepcopy(await room_repository.get(host.room_code))
+
+    with pytest.raises(RoomError) as invalid:
+        await room_manager.authenticate(host.room_code, "wrong-token")
+
+    assert invalid.value.code == "UNAUTHENTICATED"
+    assert await room_repository.get(host.room_code) == before
+
+
+@pytest.mark.asyncio
+async def test_room_recreation_waits_for_deletion_lock_lifecycle(clock):
+    class PausingRemovalManager(RoomManager):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.removal_started = asyncio.Event()
+            self.allow_removal = asyncio.Event()
+
+        async def _remove_lock(self, room_code, room_lock):
+            self.removal_started.set()
+            await self.allow_removal.wait()
+            await super()._remove_lock(room_code, room_lock)
+
+    token_ids = count(1)
+    manager = PausingRemovalManager(
+        repository=MemoryRoomRepository(),
+        code_generator=lambda: "AB7K2",
+        token_generator=lambda: f"token-{next(token_ids)}",
+        clock=clock,
+    )
+    original = await manager.create_room("Original", 4, "green")
+    session = await manager.authenticate(original.room_code, original.player_token)
+    await manager.disconnect(session)
+    clock.advance(seconds=601)
+
+    prune_task = asyncio.create_task(
+        manager.prune_expired_reservations(original.room_code)
+    )
+    await manager.removal_started.wait()
+    recreate_task = asyncio.create_task(
+        manager.create_room("Replacement", 4, "red")
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    recreation_was_serialized = not recreate_task.done()
+
+    manager.allow_removal.set()
+    await prune_task
+    replacement = await recreate_task
+
+    assert recreation_was_serialized is True
+    assert replacement.room_code == original.room_code
+    assert original.room_code in manager._room_locks
 
 
 @pytest.mark.asyncio
