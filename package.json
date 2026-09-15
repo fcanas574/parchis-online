@@ -1,0 +1,12 @@
+{
+  "name": "parchis-online",
+  "private": true,
+  "packageManager": "pnpm@11.1.3",
+  "scripts": {
+    "frontend:dev": "pnpm --dir frontend dev",
+    "frontend:typecheck": "pnpm --dir frontend typecheck",
+    "frontend:test": "pnpm --dir frontend test --run",
+    "frontend:build": "pnpm --dir frontend build",
+    "backend:test": "uv run --project backend pytest -q"
+  }
+}
