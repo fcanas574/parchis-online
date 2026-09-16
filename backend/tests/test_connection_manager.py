@@ -36,6 +36,17 @@ async def test_broadcast_sends_only_to_connections_in_room(manager, sockets):
     sockets[1].send_json.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_add_rejects_connection_from_different_room(manager, sockets):
+    connection = ClientConnection(sockets[0], SessionIdentity("CD3K4", "p1"))
+
+    with pytest.raises(ValueError, match="room code.*CD3K4.*AB7K2"):
+        await manager.add("AB7K2", connection)
+
+    assert manager.connected_player_ids("AB7K2") == set()
+    assert manager.connected_player_ids("CD3K4") == set()
+
+
 def test_event_envelope_uses_wire_names_and_version():
     event = make_event("GAME_STATE_SYNC", "AB7K2", 3, {"room": {}})
 

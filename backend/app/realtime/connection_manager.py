@@ -18,6 +18,12 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
 
     async def add(self, room_code: str, connection: ClientConnection) -> None:
+        if connection.identity.room_code != room_code:
+            raise ValueError(
+                "Connection identity room code "
+                f"{connection.identity.room_code!r} does not match target room code "
+                f"{room_code!r}."
+            )
         async with self._lock:
             room_connections = self._connections.setdefault(room_code, {})
             room_connections[connection.identity.player_id] = connection
