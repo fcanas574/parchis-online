@@ -1,7 +1,9 @@
 import json
+from collections import deque
 from typing import Any
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from app.api.rooms import get_room_manager
 from app.config import settings
@@ -106,24 +108,33 @@ async def room_websocket(
     async def send_connection_error(message: str) -> None:
         if connection is None:
             return
-        if not await connection_manager.is_current(connection):
-            return
-        state = await room_manager.get_room(room_code)
-        await connection_manager.send(
-            connection,
-            make_error_event(
-                room_code,
-                state.state_version,
-                "INVALID_MESSAGE",
-                message,
-            ),
-        )
+        async with publication_coordinator.serialize(room_code):
+            if not await connection_manager.is_current(connection):
+                return
+            state = await room_manager.get_room(room_code)
+            await send_connection_event(
+                connection,
+                make_error_event(
+                    room_code,
+                    state.state_version,
+                    "INVALID_MESSAGE",
+                    message,
+                ),
+            )
+
+    async def send_connection_event(
+        target: ClientConnection,
+        event: dict[str, object],
+    ) -> None:
+        failure = await connection_manager.send(target, event)
+        if failure is not None:
+            await disconnect_connections([failure])
 
     async def send_state_sync(
         target: ClientConnection,
         state: RoomState,
     ) -> None:
-        await connection_manager.send(
+        await send_connection_event(
             target,
             make_event(
                 "GAME_STATE_SYNC",
@@ -133,7 +144,8 @@ async def room_websocket(
             ),
         )
 
-    async def broadcast_change(change: RoomChange) -> None:
+    async def broadcast_change(change: RoomChange) -> list[ClientConnection]:
+        # Finish the complete versioned batch before publishing any disconnects.
         semantic_event = make_event(
             change.event_type,
             change.state.room_code,
@@ -141,7 +153,9 @@ async def room_websocket(
             change.payload,
             change.request_id,
         )
-        await connection_manager.broadcast(change.state.room_code, semantic_event)
+        failed = await connection_manager.broadcast(
+            change.state.room_code, semantic_event
+        )
         public_room = room_manager.public_room_from_state(change.state)
         sync_event = make_event(
             "GAME_STATE_SYNC",
@@ -149,7 +163,43 @@ async def room_websocket(
             change.state.state_version,
             {"room": public_room},
         )
-        await connection_manager.broadcast(change.state.room_code, sync_event)
+        failed.extend(
+            await connection_manager.broadcast(change.state.room_code, sync_event)
+        )
+        return failed
+
+    async def disconnect_connections(targets: list[ClientConnection]) -> None:
+        """Own removal and domain disconnect under the caller's publication lock.
+
+        Exact removal is the once-only claim shared with endpoint teardown.
+        Drain cascading send failures iteratively: never recurse or reacquire
+        the room publication lock while emitting PLAYER_LEFT and its snapshot.
+        """
+        pending = deque(targets)
+        while pending:
+            target = pending.popleft()
+            removed = await connection_manager.remove(
+                target.identity.room_code,
+                target.identity.player_id,
+                target,
+            )
+            if not removed:
+                continue
+            try:
+                change = await room_manager.disconnect(target.identity)
+            except RoomError:
+                change = None
+            if change is not None:
+                pending.extend(await broadcast_change(change))
+            if (
+                target.websocket.client_state is WebSocketState.CONNECTED
+                and target.websocket.application_state is WebSocketState.CONNECTED
+            ):
+                try:
+                    await target.websocket.close(code=1011)
+                except Exception:
+                    # A failed transport must not block cleanup.
+                    pass
 
     try:
         try:
@@ -196,14 +246,15 @@ async def room_websocket(
                             )
                         },
                     )
-                    await broadcast_change(presence_change)
+                    failures = await broadcast_change(presence_change)
+                    await disconnect_connections(failures)
         except RoomError as error:
             await send_handshake_error(error)
             return
 
         command_router = CommandRouter(room_manager)
         context = CommandContext(authenticated.identity, room_code)
-        while True:
+        while await connection_manager.is_current(connection):
             try:
                 message = await _receive_message(websocket)
             except InvalidWebSocketMessage as error:
@@ -218,7 +269,7 @@ async def room_websocket(
                     changes = await command_router.handle(context, message)
                     for change in changes:
                         if change.event_type == "ERROR":
-                            await connection_manager.send(
+                            await send_connection_event(
                                 connection,
                                 make_event(
                                     change.event_type,
@@ -229,7 +280,8 @@ async def room_websocket(
                                 ),
                             )
                         else:
-                            await broadcast_change(change)
+                            failures = await broadcast_change(change)
+                            await disconnect_connections(failures)
             if stop_stale_connection:
                 break
     except WebSocketDisconnect:
@@ -239,17 +291,4 @@ async def room_websocket(
             async with publication_coordinator.serialize(
                 connection.identity.room_code
             ):
-                removed = await connection_manager.remove(
-                    connection.identity.room_code,
-                    connection.identity.player_id,
-                    connection,
-                )
-                if removed:
-                    try:
-                        disconnect_change = await room_manager.disconnect(
-                            connection.identity
-                        )
-                    except RoomError:
-                        disconnect_change = None
-                    if disconnect_change is not None:
-                        await broadcast_change(disconnect_change)
+                await disconnect_connections([connection])

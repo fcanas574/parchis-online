@@ -89,7 +89,7 @@ class DelayingConnectionManager(ConnectionManager):
         room_code: str,
         event: dict[str, object],
         exclude_player_id: str | None = None,
-    ) -> None:
+    ) -> list[ClientConnection]:
         request_id = event.get("requestId")
         if request_id == "ready-first":
             self.first_started.set()
@@ -98,7 +98,7 @@ class DelayingConnectionManager(ConnectionManager):
                 raise TimeoutError("Timed out waiting to release first publication")
         elif request_id == "ready-second":
             self.second_started.set()
-        await super().broadcast(room_code, event, exclude_player_id)
+        return await super().broadcast(room_code, event, exclude_player_id)
 
 
 @pytest.fixture

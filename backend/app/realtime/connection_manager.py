@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 
 from app.game.models import SessionIdentity
 
@@ -111,7 +111,8 @@ class ConnectionManager:
         room_code: str,
         event: dict[str, object],
         exclude_player_id: str | None = None,
-    ) -> None:
+    ) -> list[ClientConnection]:
+        """Return failed targets; the lifecycle owner handles their removal."""
         async with self._lock:
             targets = [
                 connection
@@ -121,30 +122,27 @@ class ConnectionManager:
                 if player_id != exclude_player_id
             ]
 
+        failed: list[ClientConnection] = []
         for connection in targets:
-            await self.send(connection, event)
+            failure = await self.send(connection, event)
+            if failure is not None:
+                failed.append(failure)
+        return failed
 
     async def send(
         self,
         connection: ClientConnection,
         event: dict[str, object],
-    ) -> None:
+    ) -> ClientConnection | None:
+        """Report failure without consuming the lifecycle's removal claim."""
         try:
             await connection.websocket.send_json(event)
-        except WebSocketDisconnect:
-            await self._remove_failed(connection)
         except Exception:
-            await self._remove_failed(connection)
+            return connection
+        return None
 
     def connected_player_ids(self, room_code: str) -> set[str]:
         return set(self._connections.get(room_code, {}))
-
-    async def _remove_failed(self, connection: ClientConnection) -> None:
-        await self.remove(
-            connection.identity.room_code,
-            connection.identity.player_id,
-            connection,
-        )
 
     def _remove_locked(self, room_code: str, player_id: str) -> bool:
         room_connections = self._connections.get(room_code)

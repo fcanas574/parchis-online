@@ -139,7 +139,10 @@ async def test_broadcast_excludes_requested_player(manager, sockets):
 
 
 @pytest.mark.asyncio
-async def test_broadcast_removes_failed_connection_and_continues(manager, sockets):
+async def test_broadcast_reports_failed_connection_for_lifecycle_cleanup(
+    manager: ConnectionManager,
+    sockets: list[AsyncMock],
+) -> None:
     sockets[0].send_json.side_effect = RuntimeError("connection closed")
     first = ClientConnection(sockets[0], SessionIdentity("AB7K2", "p1"))
     second = ClientConnection(sockets[1], SessionIdentity("AB7K2", "p2"))
@@ -147,7 +150,27 @@ async def test_broadcast_removes_failed_connection_and_continues(manager, socket
     await manager.add("AB7K2", second)
     event = make_event("GAME_STATE_SYNC", "AB7K2", 4, {"room": {}})
 
-    await manager.broadcast("AB7K2", event)
+    failed = await manager.broadcast("AB7K2", event)
 
     sockets[1].send_json.assert_awaited_once_with(event)
-    assert manager.connected_player_ids("AB7K2") == {"p2"}
+    assert failed == [first]
+    # Only the lifecycle owner may claim removal and the domain disconnect.
+    assert await manager.is_current(first)
+
+
+@pytest.mark.asyncio
+async def test_send_reports_exact_failed_connection_after_replacement(
+    manager: ConnectionManager,
+    sockets: list[AsyncMock],
+) -> None:
+    old = ClientConnection(sockets[0], SessionIdentity("AB7K2", "p1"))
+    replacement = ClientConnection(sockets[1], old.identity)
+    await manager.add("AB7K2", old)
+    await manager.add("AB7K2", replacement)
+    sockets[0].send_json.side_effect = RuntimeError("old transport failed")
+
+    failed = await manager.send(old, {"type": "ERROR"})
+
+    assert failed is old
+    assert await manager.is_current(replacement)
+    assert not await manager.remove("AB7K2", "p1", old)
