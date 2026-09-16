@@ -274,26 +274,77 @@ def test_full_ready_room_can_start_as_host(client):
 
 def test_reconnect_preserves_player_identity_and_seat(client):
     host = create_room(client)
+    guest = join_room(client, host["roomCode"], 1)
+    observer = join_room(client, host["roomCode"], 2)
 
-    with client.websocket_connect(host["wsPath"]) as first_socket:
-        first_socket.send_json(
+    with client.websocket_connect(host["wsPath"]) as host_socket:
+        host_socket.send_json(
             reconnect_message(host["roomCode"], host["playerToken"])
         )
-        first_sync = receive_until(first_socket, "GAME_STATE_SYNC")
+        receive_until(host_socket, "GAME_STATE_SYNC")
 
-    first_player = first_sync["payload"]["room"]["players"][0]
+        with client.websocket_connect(observer["wsPath"]) as observer_socket:
+            observer_socket.send_json(
+                reconnect_message(
+                    observer["roomCode"], observer["playerToken"]
+                )
+            )
+            receive_until(host_socket, "GAME_STATE_SYNC")
+            receive_until(observer_socket, "GAME_STATE_SYNC")
 
-    with client.websocket_connect(host["wsPath"]) as second_socket:
-        second_socket.send_json(
-            reconnect_message(host["roomCode"], host["playerToken"])
-        )
-        reconnected = receive_until(second_socket, "PLAYER_RECONNECTED")
-        second_sync = receive_until(second_socket, "GAME_STATE_SYNC")
+            with client.websocket_connect(guest["wsPath"]) as first_guest_socket:
+                first_guest_socket.send_json(
+                    reconnect_message(guest["roomCode"], guest["playerToken"])
+                )
+                receive_until(host_socket, "GAME_STATE_SYNC")
+                receive_until(observer_socket, "GAME_STATE_SYNC")
+                first_sync = receive_until(first_guest_socket, "GAME_STATE_SYNC")
 
-    second_player = second_sync["payload"]["room"]["players"][0]
-    assert reconnected["payload"]["player"]["id"] == host["playerId"]
-    assert second_player["id"] == first_player["id"] == host["playerId"]
-    assert second_player["seatIndex"] == first_player["seatIndex"] == 0
+                # Starlette's WebSocketTestSession.__exit__ sends disconnect and
+                # immediately cancels the ASGI task. Closing explicitly while the
+                # context stays open lets the server finish both disconnect events.
+                first_guest_socket.close()
+                for remaining_socket in (host_socket, observer_socket):
+                    left = receive_until(remaining_socket, "PLAYER_LEFT")
+                    disconnected_sync = receive_until(
+                        remaining_socket, "GAME_STATE_SYNC"
+                    )
+                    disconnected_guest = next(
+                        player
+                        for player in disconnected_sync["payload"]["room"][
+                            "players"
+                        ]
+                        if player["id"] == guest["playerId"]
+                    )
+                    assert left["payload"]["playerId"] == guest["playerId"]
+                    assert disconnected_guest["isConnected"] is False
+                    assert disconnected_guest["reservationExpiresAt"] is not None
+
+            first_player = next(
+                player
+                for player in first_sync["payload"]["room"]["players"]
+                if player["id"] == guest["playerId"]
+            )
+
+            with client.websocket_connect(guest["wsPath"]) as second_guest_socket:
+                second_guest_socket.send_json(
+                    reconnect_message(guest["roomCode"], guest["playerToken"])
+                )
+                reconnected = receive_until(
+                    second_guest_socket, "PLAYER_RECONNECTED"
+                )
+                second_sync = receive_until(
+                    second_guest_socket, "GAME_STATE_SYNC"
+                )
+
+    second_player = next(
+        player
+        for player in second_sync["payload"]["room"]["players"]
+        if player["id"] == guest["playerId"]
+    )
+    assert reconnected["payload"]["player"]["id"] == guest["playerId"]
+    assert second_player["id"] == first_player["id"] == guest["playerId"]
+    assert second_player["seatIndex"] == first_player["seatIndex"] == 1
 
 
 def test_unsupported_command_returns_error_without_mutating_state(client):
