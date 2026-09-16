@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from app.api.rooms import get_room_manager
 from app.config import settings
 from app.game.models import RoomChange, RoomState
-from app.realtime.connection_manager import ClientConnection, ConnectionManager
+from app.realtime.connection_manager import (
+    ClientConnection,
+    ConnectionManager,
+    RoomPublicationCoordinator,
+)
 from app.realtime.events import make_error_event, make_event
 from app.services.command_router import CommandContext, CommandRouter
 from app.services.room_manager import RoomError, RoomManager
@@ -15,10 +19,15 @@ from app.services.room_manager import RoomError, RoomManager
 router = APIRouter(prefix="/api/ws", tags=["websocket"])
 
 _connection_manager = ConnectionManager()
+_publication_coordinator = RoomPublicationCoordinator()
 
 
 def get_connection_manager() -> ConnectionManager:
     return _connection_manager
+
+
+def get_publication_coordinator() -> RoomPublicationCoordinator:
+    return _publication_coordinator
 
 
 class InvalidWebSocketMessage(Exception):
@@ -76,6 +85,9 @@ async def room_websocket(
     room_code: str,
     room_manager: RoomManager = Depends(get_room_manager),
     connection_manager: ConnectionManager = Depends(get_connection_manager),
+    publication_coordinator: RoomPublicationCoordinator = Depends(
+        get_publication_coordinator
+    ),
 ) -> None:
     await websocket.accept()
     connection: ClientConnection | None = None
@@ -94,6 +106,8 @@ async def room_websocket(
     async def send_connection_error(message: str) -> None:
         if connection is None:
             return
+        if not await connection_manager.is_current(connection):
+            return
         state = await room_manager.get_room(room_code)
         await connection_manager.send(
             connection,
@@ -102,6 +116,20 @@ async def room_websocket(
                 state.state_version,
                 "INVALID_MESSAGE",
                 message,
+            ),
+        )
+
+    async def send_state_sync(
+        target: ClientConnection,
+        state: RoomState,
+    ) -> None:
+        await connection_manager.send(
+            target,
+            make_event(
+                "GAME_STATE_SYNC",
+                state.room_code,
+                state.state_version,
+                {"room": room_manager.public_room_from_state(state)},
             ),
         )
 
@@ -132,10 +160,6 @@ async def room_websocket(
                     "INVALID_MESSAGE",
                     "Reconnect room code does not match the WebSocket URL.",
                 )
-            authenticated = await room_manager.authenticate(
-                room_code,
-                reconnect.player_token,
-            )
         except InvalidWebSocketMessage as error:
             await send_handshake_error(RoomError("INVALID_MESSAGE", str(error)))
             return
@@ -143,25 +167,39 @@ async def room_websocket(
             await send_handshake_error(error)
             return
 
-        connection = ClientConnection(websocket, authenticated.identity)
-        await connection_manager.add(room_code, connection)
-
-        state = await room_manager.get_room(room_code)
-        event_type = (
-            "PLAYER_RECONNECTED" if authenticated.is_reconnect else "PLAYER_JOINED"
-        )
-        presence_change = RoomChange(
-            state=state,
-            event_type=event_type,
-            payload={
-                "player": _public_player(
-                    room_manager,
-                    state,
-                    authenticated.identity.player_id,
+        try:
+            async with publication_coordinator.serialize(room_code):
+                authenticated = await room_manager.authenticate(
+                    room_code,
+                    reconnect.player_token,
                 )
-            },
-        )
-        await broadcast_change(presence_change)
+                connection = ClientConnection(websocket, authenticated.identity)
+                replaced = await connection_manager.add(room_code, connection)
+
+                state = await room_manager.get_room(room_code)
+                if replaced is not None and not authenticated.is_reconnect:
+                    await send_state_sync(connection, state)
+                else:
+                    event_type = (
+                        "PLAYER_RECONNECTED"
+                        if authenticated.is_reconnect
+                        else "PLAYER_JOINED"
+                    )
+                    presence_change = RoomChange(
+                        state=state,
+                        event_type=event_type,
+                        payload={
+                            "player": _public_player(
+                                room_manager,
+                                state,
+                                authenticated.identity.player_id,
+                            )
+                        },
+                    )
+                    await broadcast_change(presence_change)
+        except RoomError as error:
+            await send_handshake_error(error)
+            return
 
         command_router = CommandRouter(room_manager)
         context = CommandContext(authenticated.identity, room_code)
@@ -172,32 +210,46 @@ async def room_websocket(
                 await send_connection_error(str(error))
                 continue
 
-            changes = await command_router.handle(context, message)
-            for change in changes:
-                if change.event_type == "ERROR":
-                    await connection_manager.send(
-                        connection,
-                        make_event(
-                            change.event_type,
-                            change.state.room_code,
-                            change.state.state_version,
-                            change.payload,
-                            change.request_id,
-                        ),
-                    )
+            stop_stale_connection = False
+            async with publication_coordinator.serialize(room_code):
+                if not await connection_manager.is_current(connection):
+                    stop_stale_connection = True
                 else:
-                    await broadcast_change(change)
+                    changes = await command_router.handle(context, message)
+                    for change in changes:
+                        if change.event_type == "ERROR":
+                            await connection_manager.send(
+                                connection,
+                                make_event(
+                                    change.event_type,
+                                    change.state.room_code,
+                                    change.state.state_version,
+                                    change.payload,
+                                    change.request_id,
+                                ),
+                            )
+                        else:
+                            await broadcast_change(change)
+            if stop_stale_connection:
+                break
     except WebSocketDisconnect:
         pass
     finally:
         if connection is not None:
-            await connection_manager.remove(
-                connection.identity.room_code,
-                connection.identity.player_id,
-            )
-            try:
-                disconnect_change = await room_manager.disconnect(connection.identity)
-            except RoomError:
-                disconnect_change = None
-            if disconnect_change is not None:
-                await broadcast_change(disconnect_change)
+            async with publication_coordinator.serialize(
+                connection.identity.room_code
+            ):
+                removed = await connection_manager.remove(
+                    connection.identity.room_code,
+                    connection.identity.player_id,
+                    connection,
+                )
+                if removed:
+                    try:
+                        disconnect_change = await room_manager.disconnect(
+                            connection.identity
+                        )
+                    except RoomError:
+                        disconnect_change = None
+                    if disconnect_change is not None:
+                        await broadcast_change(disconnect_change)

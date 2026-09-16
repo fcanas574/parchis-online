@@ -79,8 +79,43 @@ async def test_remove_updates_connected_player_ids(manager, sockets):
 
     assert manager.connected_player_ids("AB7K2") == {"p1"}
 
-    await manager.remove("AB7K2", "p1")
+    removed = await manager.remove("AB7K2", "p1")
 
+    assert removed is True
+    assert manager.connected_player_ids("AB7K2") == set()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_connection_replaces_old_and_stale_remove_is_ignored(
+    manager,
+    sockets,
+):
+    old_connection = ClientConnection(
+        sockets[0], SessionIdentity("AB7K2", "p1")
+    )
+    new_connection = ClientConnection(
+        sockets[1], SessionIdentity("AB7K2", "p1")
+    )
+    await manager.add("AB7K2", old_connection)
+
+    replaced = await manager.add("AB7K2", new_connection)
+    stale_removed = await manager.remove(
+        "AB7K2",
+        "p1",
+        old_connection,
+    )
+
+    assert replaced is old_connection
+    sockets[0].close.assert_awaited_once_with(
+        code=4000,
+        reason="Replaced by a newer connection.",
+    )
+    assert stale_removed is False
+    assert manager.connected_player_ids("AB7K2") == {"p1"}
+
+    current_removed = await manager.remove("AB7K2", "p1", new_connection)
+
+    assert current_removed is True
     assert manager.connected_player_ids("AB7K2") == set()
 
 

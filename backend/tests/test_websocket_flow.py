@@ -1,12 +1,17 @@
+import asyncio
+import threading
 from contextlib import ExitStack
 from itertools import chain, count, product
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.api.rooms import get_room_manager, get_room_rate_limiter
+from app.api.websocket import get_connection_manager
 from app.main import app
+from app.realtime.connection_manager import ClientConnection, ConnectionManager
 from app.repositories.memory_room_repository import MemoryRoomRepository
 from app.security.rate_limit import FixedWindowRateLimiter
 from app.services.room_manager import RoomManager
@@ -37,6 +42,63 @@ def receive_until_request(websocket, event_type: str, request_id: str) -> dict:
     pytest.fail(
         f"Did not receive {event_type} for {request_id} within 20 messages"
     )
+
+
+def receive_close_code(websocket, timeout: float = 1.0) -> int:
+    async def receive_message() -> dict:
+        with anyio.fail_after(timeout):
+            return await websocket._send_rx.receive()
+
+    for _ in range(20):
+        message = websocket.portal.call(receive_message)
+        if message["type"] == "websocket.close":
+            return message.get("code", 1000)
+    pytest.fail("Did not receive a WebSocket close within 20 messages")
+
+
+class TrackingConnectionManager(ConnectionManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.remove_attempted = threading.Event()
+        self.last_remove_result: bool | None = None
+
+    async def remove(
+        self,
+        room_code: str,
+        player_id: str,
+        connection: ClientConnection | None = None,
+    ) -> bool:
+        if connection is None:
+            result = await super().remove(room_code, player_id)
+        else:
+            result = await super().remove(room_code, player_id, connection)
+        self.last_remove_result = result
+        self.remove_attempted.set()
+        return result
+
+
+class DelayingConnectionManager(ConnectionManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = threading.Event()
+        self.second_started = threading.Event()
+        self.release_first = threading.Event()
+
+    async def broadcast(
+        self,
+        room_code: str,
+        event: dict[str, object],
+        exclude_player_id: str | None = None,
+    ) -> None:
+        request_id = event.get("requestId")
+        if request_id == "ready-first":
+            self.first_started.set()
+            released = await asyncio.to_thread(self.release_first.wait, 2.0)
+            if not released:
+                raise TimeoutError("Timed out waiting to release first publication")
+        elif request_id == "ready-second":
+            self.second_started.set()
+        await super().broadcast(room_code, event, exclude_player_id)
 
 
 @pytest.fixture
@@ -345,6 +407,122 @@ def test_reconnect_preserves_player_identity_and_seat(client):
     assert reconnected["payload"]["player"]["id"] == guest["playerId"]
     assert second_player["id"] == first_player["id"] == guest["playerId"]
     assert second_player["seatIndex"] == first_player["seatIndex"] == 1
+
+
+def test_overlapping_reconnect_replaces_old_without_disconnecting_new(client):
+    connection_manager = TrackingConnectionManager()
+    app.dependency_overrides[get_connection_manager] = lambda: connection_manager
+    host = create_room(client)
+
+    with client.websocket_connect(host["wsPath"]) as old_socket:
+        old_socket.send_json(
+            reconnect_message(host["roomCode"], host["playerToken"])
+        )
+        receive_until(old_socket, "GAME_STATE_SYNC")
+
+        with client.websocket_connect(host["wsPath"]) as new_socket:
+            new_socket.send_json(
+                reconnect_message(host["roomCode"], host["playerToken"])
+            )
+            receive_until(new_socket, "GAME_STATE_SYNC")
+
+            assert receive_close_code(old_socket) == 4000
+            old_socket.close()
+            assert connection_manager.remove_attempted.wait(timeout=2.0)
+            assert connection_manager.last_remove_result is False
+
+            new_socket.send_json(
+                {
+                    "type": "PLAYER_READY",
+                    "version": 1,
+                    "ready": True,
+                    "requestId": "replacement-ready",
+                }
+            )
+            receive_until_request(
+                new_socket,
+                "PLAYER_READY",
+                "replacement-ready",
+            )
+            sync = receive_until(new_socket, "GAME_STATE_SYNC")
+
+    current_player = sync["payload"]["room"]["players"][0]
+    assert current_player["id"] == host["playerId"]
+    assert current_player["isConnected"] is True
+    assert current_player["isReady"] is True
+
+
+def test_concurrent_mutations_publish_versions_in_commit_order(client):
+    connection_manager = DelayingConnectionManager()
+    app.dependency_overrides[get_connection_manager] = lambda: connection_manager
+    host = create_room(client)
+    guest = join_room(client, host["roomCode"], 1)
+    observer = join_room(client, host["roomCode"], 2)
+
+    with client.websocket_connect(host["wsPath"]) as first_socket:
+        first_socket.send_json(
+            reconnect_message(host["roomCode"], host["playerToken"])
+        )
+        receive_until(first_socket, "GAME_STATE_SYNC")
+        with client.websocket_connect(guest["wsPath"]) as second_socket:
+            second_socket.send_json(
+                reconnect_message(guest["roomCode"], guest["playerToken"])
+            )
+            receive_until(first_socket, "GAME_STATE_SYNC")
+            receive_until(second_socket, "GAME_STATE_SYNC")
+            with client.websocket_connect(observer["wsPath"]) as observer_socket:
+                observer_socket.send_json(
+                    reconnect_message(
+                        observer["roomCode"], observer["playerToken"]
+                    )
+                )
+                receive_until(first_socket, "GAME_STATE_SYNC")
+                receive_until(second_socket, "GAME_STATE_SYNC")
+                receive_until(observer_socket, "GAME_STATE_SYNC")
+
+                first_socket.send_json(
+                    {
+                        "type": "PLAYER_READY",
+                        "version": 1,
+                        "ready": True,
+                        "requestId": "ready-first",
+                    }
+                )
+                assert connection_manager.first_started.wait(timeout=2.0)
+
+                def release_when_second_can_publish() -> None:
+                    connection_manager.second_started.wait(timeout=0.5)
+                    connection_manager.release_first.set()
+
+                releaser = threading.Thread(
+                    target=release_when_second_can_publish,
+                    daemon=True,
+                )
+                releaser.start()
+                try:
+                    second_socket.send_json(
+                        {
+                            "type": "PLAYER_READY",
+                            "version": 1,
+                            "ready": True,
+                            "requestId": "ready-second",
+                        }
+                    )
+                    events = [observer_socket.receive_json() for _ in range(4)]
+                finally:
+                    connection_manager.release_first.set()
+                    releaser.join(timeout=2.0)
+
+    assert [event["type"] for event in events] == [
+        "PLAYER_READY",
+        "GAME_STATE_SYNC",
+        "PLAYER_READY",
+        "GAME_STATE_SYNC",
+    ]
+    versions = [event["stateVersion"] for event in events]
+    assert versions == sorted(versions)
+    assert versions[0] == versions[1]
+    assert versions[2] == versions[3] == versions[0] + 1
 
 
 def test_unsupported_command_returns_error_without_mutating_state(client):
