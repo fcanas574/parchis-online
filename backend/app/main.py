@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import rooms
+from app.api import rooms, websocket
 from app.config import settings
 
 app = FastAPI(title="Parchís Online API", version="0.1.0")
@@ -13,6 +13,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(rooms.router)
+app.include_router(websocket.router)
 
 
 @app.get("/health")
