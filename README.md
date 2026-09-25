@@ -45,7 +45,7 @@ pnpm frontend:build
 pnpm backend:test
 ```
 
-Los tests de backend ejecutan flujos REST y WebSocket de salas de 4, 5 y 6 personas, inicio del anfitrión y reconexión.
+Los tests REST cubren salas con capacidad para 4, 5 y 6 personas y el rechazo al superar su límite. El flujo WebSocket completo —incluidos inicio exclusivo del anfitrión y snapshots públicos idénticos para todos— se prueba con cuatro jugadores; la reconexión también tiene cobertura automatizada.
 
 ## Estado y privacidad
 

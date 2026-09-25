@@ -76,6 +76,11 @@ def receive_complete_snapshot(
     pytest.fail(f"Did not receive a {player_count}-player snapshot")
 
 
+def assert_room_snapshots_equal(events: list[dict]) -> None:
+    rooms = [event["payload"]["room"] for event in events]
+    assert all(room == rooms[0] for room in rooms[1:])
+
+
 def receive_close_code(websocket, timeout: float = 1.0) -> int:
     async def receive_message() -> dict:
         with anyio.fail_after(timeout):
@@ -339,6 +344,7 @@ def test_four_player_room_full_flow_is_authoritative_for_every_socket(client):
             for websocket in sockets
         ]
         assert len({event["stateVersion"] for event in snapshots}) == 1
+        assert_room_snapshots_equal(snapshots)
         latest_version = snapshots[0]["stateVersion"]
         for event in snapshots:
             room = event["payload"]["room"]
@@ -390,6 +396,7 @@ def test_four_player_room_full_flow_is_authoritative_for_every_socket(client):
                 event["stateVersion"] for event in [*ready_events, *sync_events]
             }
             assert batch_versions == {latest_version + 1}
+            assert_room_snapshots_equal(sync_events)
             latest_version += 1
             assert all(
                 {
@@ -412,6 +419,7 @@ def test_four_player_room_full_flow_is_authoritative_for_every_socket(client):
         assert {
             event["stateVersion"] for event in [*started_events, *sync_events]
         } == {latest_version + 1}
+        assert_room_snapshots_equal(sync_events)
         for started, sync in zip(started_events, sync_events, strict=True):
             assert started["payload"] == {"status": "playing"}
             assert sync["payload"]["room"]["status"] == "playing"
