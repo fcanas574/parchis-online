@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -10,17 +10,14 @@ export function RoomInvite({ roomCode }: { roomCode: string }) {
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const roomPath = `/room/${roomCode}`;
-  const invitation = useMemo(
-    () => (typeof window === "undefined" ? roomPath : new URL(roomPath, window.location.origin).toString()),
-    [roomPath],
-  );
+  const [invitation, setInvitation] = useState(roomPath);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    setInvitation(new URL(roomPath, window.location.origin).toString());
+    return () => {
       if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current);
-    },
-    [],
-  );
+    };
+  }, [roomPath]);
 
   const copyInvitation = async () => {
     if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current);
@@ -52,7 +49,7 @@ export function RoomInvite({ roomCode }: { roomCode: string }) {
             id="invitation-link"
             className="invite-link"
             readOnly
-            value={roomPath}
+            value={invitation}
             onFocus={(event) => event.currentTarget.select()}
           />
           <Button onClick={copyInvitation} variant="secondary">

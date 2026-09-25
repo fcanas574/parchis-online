@@ -108,6 +108,36 @@ describe("LandingPage", () => {
     expect(pushMock).not.toHaveBeenCalled();
   });
 
+  it("associates an invalid create name with its inline validation error", () => {
+    render(<LandingPage />);
+
+    const name = screen.getByLabelText<HTMLInputElement>("Tu nombre");
+    fireEvent.change(name, { target: { value: "F" } });
+    fireEvent.click(screen.getByRole("button", { name: "Crear sala" }));
+
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(name).toHaveAttribute("aria-describedby", "create-name-error");
+    expect(document.getElementById("create-name-error")).toHaveTextContent(
+      "El nombre debe tener entre 2 y 20 caracteres.",
+    );
+  });
+
+  it("associates an invalid join code with its inline validation error", () => {
+    render(<LandingPage initialMode="join" initialRoomCode="BAD" />);
+
+    fireEvent.change(screen.getByLabelText("Tu nombre"), {
+      target: { value: "Ana" },
+    });
+    const code = screen.getByLabelText<HTMLInputElement>("Código de sala");
+    fireEvent.click(screen.getByRole("button", { name: "Entrar a la sala" }));
+
+    expect(code).toHaveAttribute("aria-invalid", "true");
+    expect(code).toHaveAttribute("aria-describedby", "room-code-error");
+    expect(document.getElementById("room-code-error")).toHaveTextContent(
+      "El código debe tener 5 letras o números.",
+    );
+  });
+
   it("blocks duplicate room creation while the first request is pending", async () => {
     let resolveRequest!: (value: RoomCredentials) => void;
     createRoomMock.mockReturnValue(

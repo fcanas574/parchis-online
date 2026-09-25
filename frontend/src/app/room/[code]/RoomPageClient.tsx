@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import { LandingPage } from "@/components/home/LandingPage";
 import { Lobby } from "@/components/lobby/Lobby";
 import { Card } from "@/components/ui/card";
 import { readSession, type RoomSession } from "@/lib/session";
@@ -35,19 +35,14 @@ export function RoomPageClient({ code }: { code: string }) {
 
   if (!resolvedRoom.session) {
     return (
-      <main className="app-shell missing-session-shell">
-        <Card className="missing-session-card">
-          <p className="eyebrow">Sala {roomCode}</p>
-          <h1>Necesitas una invitación válida</h1>
-          <p>
-            No encontramos una sesión guardada para esta sala. Vuelve al inicio para crear una
-            partida o entrar con el código.
-          </p>
-          <Link className="home-link" href="/">
-            Volver al inicio
-          </Link>
-        </Card>
-      </main>
+      <LandingPage
+        initialMode="join"
+        initialRoomCode={roomCode}
+        onSessionSaved={(session) => {
+          useGameStore.getState().setSession(session);
+          setResolvedRoom({ roomCode, session });
+        }}
+      />
     );
   }
 

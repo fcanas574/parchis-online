@@ -151,7 +151,6 @@ export function useGameSocket(roomCode: string) {
       socketRef.current = socket;
       socket.onopen = () => {
         retryAttemptRef.current = 0;
-        store.setConnectionState("connected");
         socket.send(
           JSON.stringify({
             type: "RECONNECT",
@@ -173,6 +172,9 @@ export function useGameSocket(roomCode: string) {
             return;
           }
           store.applyEvent(event);
+          if (socketRef.current === socket && event.type === "GAME_STATE_SYNC") {
+            store.setConnectionState("connected");
+          }
           if (isAuthenticationError(event)) {
             stopRetryingRef.current = true;
             store.setConnectionState("error");

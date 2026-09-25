@@ -20,6 +20,7 @@ const colors: Array<{ value: PlayerColor; label: string }> = [
 ];
 
 type Mode = "create" | "join";
+type ValidationField = "createName" | "joinName" | "roomCode";
 
 const errorMessage = (error: unknown) => {
   if (
@@ -88,22 +89,31 @@ function ColorChoices({
   );
 }
 
-export function LandingPage() {
+export function LandingPage({
+  initialMode = "create",
+  initialRoomCode = "",
+  onSessionSaved,
+}: {
+  initialMode?: Mode;
+  initialRoomCode?: string;
+  onSessionSaved?: (session: RoomCredentials) => void;
+} = {}) {
   const router = useRouter();
   const mountedRef = useRef(true);
   const pendingRef = useRef(false);
   const createNameRef = useRef<HTMLInputElement>(null);
   const joinNameRef = useRef<HTMLInputElement>(null);
   const roomCodeRef = useRef<HTMLInputElement>(null);
-  const [mode, setMode] = useState<Mode>("create");
+  const [mode, setMode] = useState<Mode>(initialMode);
   const [createName, setCreateName] = useState("");
   const [playerCount, setPlayerCount] = useState<4 | 5 | 6>(4);
   const [createColor, setCreateColor] = useState<PlayerColor>("green");
   const [joinName, setJoinName] = useState("");
-  const [roomCode, setRoomCode] = useState("");
+  const [roomCode, setRoomCode] = useState(initialRoomCode.toUpperCase().slice(0, 5));
   const [joinColor, setJoinColor] = useState<PlayerColor | "">("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorField, setErrorField] = useState<ValidationField | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -117,6 +127,7 @@ export function LandingPage() {
     pendingRef.current = true;
     setPending(true);
     setError(null);
+    setErrorField(null);
     return true;
   };
 
@@ -127,6 +138,7 @@ export function LandingPage() {
 
   const complete = (credentials: RoomCredentials) => {
     saveSession(credentials);
+    onSessionSaved?.(credentials);
     router.push(`/room/${credentials.roomCode.toUpperCase()}`);
   };
 
@@ -136,6 +148,7 @@ export function LandingPage() {
     const displayName = createName.trim();
     if (displayName.length < 2 || displayName.length > 20) {
       setError("El nombre debe tener entre 2 y 20 caracteres.");
+      setErrorField("createName");
       createNameRef.current?.focus();
       endRequest();
       return;
@@ -144,7 +157,10 @@ export function LandingPage() {
       const credentials = await createRoom({ displayName, playerCount, color: createColor });
       if (mountedRef.current) complete(credentials);
     } catch (requestError) {
-      if (mountedRef.current) setError(errorMessage(requestError));
+      if (mountedRef.current) {
+        setError(errorMessage(requestError));
+        setErrorField(null);
+      }
     } finally {
       endRequest();
     }
@@ -157,12 +173,14 @@ export function LandingPage() {
     const normalizedCode = roomCode.trim().toUpperCase();
     if (displayName.length < 2 || displayName.length > 20) {
       setError("El nombre debe tener entre 2 y 20 caracteres.");
+      setErrorField("joinName");
       joinNameRef.current?.focus();
       endRequest();
       return;
     }
     if (!/^[A-Z0-9]{5}$/.test(normalizedCode)) {
       setError("El código debe tener 5 letras o números.");
+      setErrorField("roomCode");
       roomCodeRef.current?.focus();
       endRequest();
       return;
@@ -174,7 +192,10 @@ export function LandingPage() {
       });
       if (mountedRef.current) complete(credentials);
     } catch (requestError) {
-      if (mountedRef.current) setError(errorMessage(requestError));
+      if (mountedRef.current) {
+        setError(errorMessage(requestError));
+        setErrorField(null);
+      }
     } finally {
       endRequest();
     }
@@ -184,6 +205,7 @@ export function LandingPage() {
     if (pending) return;
     setMode(nextMode);
     setError(null);
+    setErrorField(null);
   };
 
   return (
@@ -238,6 +260,8 @@ export function LandingPage() {
                   ref={createNameRef}
                   id="create-name"
                   autoComplete="nickname"
+                  aria-invalid={errorField === "createName" ? true : undefined}
+                  aria-describedby={errorField === "createName" ? "create-name-error" : undefined}
                   maxLength={20}
                   required
                   value={createName}
@@ -271,7 +295,11 @@ export function LandingPage() {
               />
 
               <div className="form-feedback" aria-live="polite">
-                {error ? <p role="alert">{error}</p> : null}
+                {error ? (
+                  <p id={errorField === "createName" ? "create-name-error" : undefined} role="alert">
+                    {error}
+                  </p>
+                ) : null}
               </div>
               <Button
                 aria-busy={pending}
@@ -293,6 +321,8 @@ export function LandingPage() {
                   ref={joinNameRef}
                   id="join-name"
                   autoComplete="nickname"
+                  aria-invalid={errorField === "joinName" ? true : undefined}
+                  aria-describedby={errorField === "joinName" ? "join-name-error" : undefined}
                   maxLength={20}
                   required
                   value={joinName}
@@ -308,6 +338,8 @@ export function LandingPage() {
                   id="room-code"
                   autoCapitalize="characters"
                   autoComplete="off"
+                  aria-invalid={errorField === "roomCode" ? true : undefined}
+                  aria-describedby={errorField === "roomCode" ? "room-code-error" : undefined}
                   className="room-code-input"
                   inputMode="text"
                   maxLength={5}
@@ -323,7 +355,14 @@ export function LandingPage() {
                 onChange={setJoinColor}
               />
               <div className="form-feedback" aria-live="polite">
-                {error ? <p role="alert">{error}</p> : null}
+                {error ? (
+                  <p
+                    id={errorField === "joinName" ? "join-name-error" : errorField === "roomCode" ? "room-code-error" : undefined}
+                    role="alert"
+                  >
+                    {error}
+                  </p>
+                ) : null}
               </div>
               <Button
                 aria-busy={pending}

@@ -146,6 +146,9 @@ describe("Lobby", () => {
     expect(
       await screen.findByText("No se pudo copiar. Selecciona el enlace y cópialo manualmente."),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText("Invitación")).toHaveValue(
+      `${window.location.origin}/room/AB7K2`,
+    );
   });
 
   it("shows the host start action but disables it until the room is full and ready", () => {
