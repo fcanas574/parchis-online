@@ -2,7 +2,11 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Parchís Online",
+  title: {
+    default: "Parchís Online",
+    template: "%s — Parchís Online",
+  },
+  description: "Salas privadas de Parchís para jugar con amigos.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
