@@ -27,3 +27,22 @@ export type PublicRoomState = {
   players: PublicPlayer[];
   stateVersion: number;
 };
+
+export type CreateRoomPayload = {
+  displayName: string;
+  playerCount: 4 | 5 | 6;
+  color?: PlayerColor;
+};
+
+export type JoinRoomPayload = {
+  displayName: string;
+  color?: PlayerColor;
+};
+
+export type RoomCredentials = {
+  roomCode: string;
+  playerId: string;
+  playerToken: string;
+  isHost: boolean;
+  wsPath: string;
+};
