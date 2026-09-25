@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from contextlib import ExitStack
 from itertools import chain, count, product
@@ -17,6 +18,20 @@ from app.security.rate_limit import FixedWindowRateLimiter
 from app.services.room_manager import RoomManager
 
 
+_PRIVATE_CREDENTIAL_KEYS = {"playerToken", "tokenHash", "token_hash"}
+
+
+def assert_no_private_credentials(value: object) -> None:
+    assert "token-" not in json.dumps(value)
+    if isinstance(value, dict):
+        assert _PRIVATE_CREDENTIAL_KEYS.isdisjoint(value)
+        for nested in value.values():
+            assert_no_private_credentials(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            assert_no_private_credentials(nested)
+
+
 def reconnect_message(room_code: str, token: str) -> dict:
     return {
         "type": "RECONNECT",
@@ -29,6 +44,7 @@ def reconnect_message(room_code: str, token: str) -> dict:
 def receive_until(websocket, event_type: str) -> dict:
     for _ in range(20):
         event = websocket.receive_json()
+        assert_no_private_credentials(event)
         if event["type"] == event_type:
             return event
     pytest.fail(f"Did not receive {event_type} within 20 messages")
@@ -37,11 +53,27 @@ def receive_until(websocket, event_type: str) -> dict:
 def receive_until_request(websocket, event_type: str, request_id: str) -> dict:
     for _ in range(20):
         event = websocket.receive_json()
+        assert_no_private_credentials(event)
         if event["type"] == event_type and event.get("requestId") == request_id:
             return event
     pytest.fail(
         f"Did not receive {event_type} for {request_id} within 20 messages"
     )
+
+
+def receive_complete_snapshot(
+    websocket, player_count: int, state_version: int | None = None
+) -> dict:
+    for _ in range(40):
+        event = websocket.receive_json()
+        assert_no_private_credentials(event)
+        if (
+            event["type"] == "GAME_STATE_SYNC"
+            and len(event["payload"]["room"]["players"]) == player_count
+            and (state_version is None or event["stateVersion"] == state_version)
+        ):
+            return event
+    pytest.fail(f"Did not receive a {player_count}-player snapshot")
 
 
 def receive_close_code(websocket, timeout: float = 1.0) -> int:
@@ -284,7 +316,7 @@ def test_start_game_errors_do_not_mutate_lobby(client):
     assert client.get(f"/api/rooms/{host['roomCode']}").json()["status"] == "lobby"
 
 
-def test_full_ready_room_can_start_as_host(client):
+def test_four_player_room_full_flow_is_authoritative_for_every_socket(client):
     host = create_room(client)
     guests = [join_room(client, host["roomCode"], number) for number in range(1, 4)]
     credentials = [host, *guests]
@@ -298,7 +330,30 @@ def test_full_ready_room_can_start_as_host(client):
             websocket.send_json(
                 reconnect_message(player["roomCode"], player["playerToken"])
             )
-            receive_until(websocket, "GAME_STATE_SYNC")
+
+        expected_version = client.get(f"/api/rooms/{host['roomCode']}").json()[
+            "stateVersion"
+        ]
+        snapshots = [
+            receive_complete_snapshot(websocket, 4, expected_version)
+            for websocket in sockets
+        ]
+        assert len({event["stateVersion"] for event in snapshots}) == 1
+        latest_version = snapshots[0]["stateVersion"]
+        for event in snapshots:
+            room = event["payload"]["room"]
+            assert room["status"] == "lobby"
+            assert room["maxPlayers"] == 4
+            assert [player["seatIndex"] for player in room["players"]] == [0, 1, 2, 3]
+
+        sockets[1].send_json(
+            {"type": "START_GAME", "version": 1, "requestId": "guest-start"}
+        )
+        non_host_error = receive_until_request(sockets[1], "ERROR", "guest-start")
+        assert non_host_error["payload"]["code"] == "NOT_HOST"
+        assert client.get(f"/api/rooms/{host['roomCode']}").json()[
+            "stateVersion"
+        ] == latest_version
 
         sockets[0].send_json(
             {"type": "START_GAME", "version": 1, "requestId": "start-unready"}
@@ -307,9 +362,14 @@ def test_full_ready_room_can_start_as_host(client):
             sockets[0], "ERROR", "start-unready"
         )
         assert unready_error["payload"]["code"] == "PLAYER_NOT_READY"
+        assert client.get(f"/api/rooms/{host['roomCode']}").json()[
+            "stateVersion"
+        ] == latest_version
 
+        ready_player_ids: set[str] = set()
         for number, websocket in enumerate(sockets):
             request_id = f"ready-{number}"
+            ready_player_ids.add(credentials[number]["playerId"])
             websocket.send_json(
                 {
                     "type": "PLAYER_READY",
@@ -318,20 +378,89 @@ def test_full_ready_room_can_start_as_host(client):
                     "requestId": request_id,
                 }
             )
-            receive_until_request(websocket, "PLAYER_READY", request_id)
+            ready_events = [
+                receive_until_request(recipient, "PLAYER_READY", request_id)
+                for recipient in sockets
+            ]
+            sync_events = [
+                receive_until(recipient, "GAME_STATE_SYNC")
+                for recipient in sockets
+            ]
+            batch_versions = {
+                event["stateVersion"] for event in [*ready_events, *sync_events]
+            }
+            assert batch_versions == {latest_version + 1}
+            latest_version += 1
+            assert all(
+                {
+                    player["id"]
+                    for player in sync["payload"]["room"]["players"]
+                    if player["isReady"]
+                }
+                == ready_player_ids
+                for sync in sync_events
+            )
 
         sockets[0].send_json(
             {"type": "START_GAME", "version": 1, "requestId": "start-full"}
         )
 
-        for websocket in sockets:
-            started = receive_until(websocket, "GAME_STARTED")
-            sync = receive_until(websocket, "GAME_STATE_SYNC")
+        started_events = [receive_until(websocket, "GAME_STARTED") for websocket in sockets]
+        sync_events = [
+            receive_until(websocket, "GAME_STATE_SYNC") for websocket in sockets
+        ]
+        assert {
+            event["stateVersion"] for event in [*started_events, *sync_events]
+        } == {latest_version + 1}
+        for started, sync in zip(started_events, sync_events, strict=True):
             assert started["payload"] == {"status": "playing"}
             assert sync["payload"]["room"]["status"] == "playing"
             assert all(
                 player["isReady"] for player in sync["payload"]["room"]["players"]
             )
+
+
+@pytest.mark.parametrize("player_count", [5, 6])
+def test_five_and_six_player_rooms_fill_unique_seats_and_reject_overflow(
+    client, player_count
+):
+    colors = ("green", "red", "blue", "yellow", "purple", "orange")
+    created = client.post(
+        "/api/rooms",
+        json={
+            "displayName": "Host",
+            "playerCount": player_count,
+            "color": colors[0],
+        },
+    )
+    assert created.status_code == 201
+    host = created.json()
+
+    for seat_index in range(1, player_count):
+        joined = client.post(
+            f"/api/rooms/{host['roomCode']}/join",
+            json={
+                "displayName": f"Guest {seat_index}",
+                "color": colors[seat_index],
+            },
+        )
+        assert joined.status_code == 201
+
+    room_response = client.get(f"/api/rooms/{host['roomCode']}")
+    assert room_response.status_code == 200
+    room = room_response.json()
+    assert room["maxPlayers"] == player_count
+    assert [player["seatIndex"] for player in room["players"]] == list(
+        range(player_count)
+    )
+    assert len({player["color"] for player in room["players"]}) == player_count
+
+    overflow = client.post(
+        f"/api/rooms/{host['roomCode']}/join",
+        json={"displayName": "One too many", "color": "green"},
+    )
+    assert overflow.status_code == 409
+    assert overflow.json()["code"] == "ROOM_FULL"
 
 
 def test_reconnect_preserves_player_identity_and_seat(client):
@@ -407,6 +536,90 @@ def test_reconnect_preserves_player_identity_and_seat(client):
     assert reconnected["payload"]["player"]["id"] == guest["playerId"]
     assert second_player["id"] == first_player["id"] == guest["playerId"]
     assert second_player["seatIndex"] == first_player["seatIndex"] == 1
+
+
+def test_reconnect_before_reservation_expiry_restores_the_same_seat_and_color(
+    client, clock
+):
+    host = create_room(client)
+    guest = join_room(client, host["roomCode"], 1)
+
+    with client.websocket_connect(host["wsPath"]) as host_socket:
+        host_socket.send_json(
+            reconnect_message(host["roomCode"], host["playerToken"])
+        )
+        receive_until(host_socket, "GAME_STATE_SYNC")
+
+        with client.websocket_connect(guest["wsPath"]) as guest_socket:
+            guest_socket.send_json(
+                reconnect_message(guest["roomCode"], guest["playerToken"])
+            )
+            receive_until(guest_socket, "GAME_STATE_SYNC")
+            receive_until(host_socket, "GAME_STATE_SYNC")
+            guest_socket.close()
+
+        receive_until(host_socket, "PLAYER_LEFT")
+        disconnected = receive_until(host_socket, "GAME_STATE_SYNC")
+        reserved = next(
+            player
+            for player in disconnected["payload"]["room"]["players"]
+            if player["id"] == guest["playerId"]
+        )
+        assert reserved["reservationExpiresAt"] is not None
+
+        clock.advance(seconds=599)
+        with client.websocket_connect(guest["wsPath"]) as returned_socket:
+            returned_socket.send_json(
+                reconnect_message(guest["roomCode"], guest["playerToken"])
+            )
+            reconnected = receive_until(returned_socket, "PLAYER_RECONNECTED")
+            snapshot = receive_until(returned_socket, "GAME_STATE_SYNC")
+
+    restored = next(
+        player
+        for player in snapshot["payload"]["room"]["players"]
+        if player["id"] == guest["playerId"]
+    )
+    assert reconnected["payload"]["player"]["id"] == guest["playerId"]
+    assert restored["id"] == guest["playerId"]
+    assert restored["seatIndex"] == 1
+    assert restored["color"] == "red"
+    assert restored["isConnected"] is True
+    assert restored["reservationExpiresAt"] is None
+
+
+def test_expired_reservation_rejects_the_original_player_token(client, clock):
+    host = create_room(client)
+    guest = join_room(client, host["roomCode"], 1)
+
+    with client.websocket_connect(host["wsPath"]) as host_socket:
+        host_socket.send_json(
+            reconnect_message(host["roomCode"], host["playerToken"])
+        )
+        receive_until(host_socket, "GAME_STATE_SYNC")
+
+        with client.websocket_connect(guest["wsPath"]) as guest_socket:
+            guest_socket.send_json(
+                reconnect_message(guest["roomCode"], guest["playerToken"])
+            )
+            receive_until(guest_socket, "GAME_STATE_SYNC")
+            receive_until(host_socket, "GAME_STATE_SYNC")
+            guest_socket.close()
+
+        receive_until(host_socket, "PLAYER_LEFT")
+        receive_until(host_socket, "GAME_STATE_SYNC")
+        clock.advance(seconds=601)
+
+        with client.websocket_connect(guest["wsPath"]) as expired_socket:
+            expired_socket.send_json(
+                reconnect_message(guest["roomCode"], guest["playerToken"])
+            )
+            error = receive_until(expired_socket, "ERROR")
+            with pytest.raises(WebSocketDisconnect) as closed:
+                expired_socket.receive_json()
+
+    assert error["payload"]["code"] == "UNAUTHENTICATED"
+    assert closed.value.code == 1008
 
 
 def test_overlapping_reconnect_replaces_old_without_disconnecting_new(client):
