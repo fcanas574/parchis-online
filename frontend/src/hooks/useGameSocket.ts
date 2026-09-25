@@ -10,6 +10,9 @@ import type { ClientCommand, ServerEvent } from "@/types/protocol";
 const RETRY_DELAYS = [500, 1_000, 2_000, 4_000] as const;
 const API_ORIGIN = process.env.NEXT_PUBLIC_API_ORIGIN;
 
+const isFiniteInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && Number.isInteger(value);
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
@@ -19,7 +22,7 @@ const isPublicPlayer = (value: unknown): value is PublicPlayer => {
     typeof value.id === "string" &&
     typeof value.displayName === "string" &&
     typeof value.color === "string" &&
-    typeof value.seatIndex === "number" &&
+    isFiniteInteger(value.seatIndex) &&
     typeof value.isHost === "boolean" &&
     typeof value.isReady === "boolean" &&
     typeof value.isConnected === "boolean" &&
@@ -34,17 +37,17 @@ const isPublicRoom = (value: unknown): value is PublicRoomState => {
     (value.status === "lobby" || value.status === "playing" || value.status === "finished") &&
     (value.maxPlayers === 4 || value.maxPlayers === 5 || value.maxPlayers === 6) &&
     typeof value.hostPlayerId === "string" &&
-    typeof value.stateVersion === "number" &&
+    isFiniteInteger(value.stateVersion) &&
     value.players.every(isPublicPlayer)
   );
 };
 
-const isServerEvent = (value: unknown): value is ServerEvent => {
+export const isServerEvent = (value: unknown): value is ServerEvent => {
   if (!isRecord(value) || !isRecord(value.payload)) return false;
   if (
     value.version !== 1 ||
     typeof value.roomCode !== "string" ||
-    typeof value.stateVersion !== "number" ||
+    !isFiniteInteger(value.stateVersion) ||
     typeof value.eventId !== "string" ||
     typeof value.serverTime !== "string" ||
     (value.requestId !== undefined && typeof value.requestId !== "string")
@@ -54,7 +57,11 @@ const isServerEvent = (value: unknown): value is ServerEvent => {
 
   switch (value.type) {
     case "GAME_STATE_SYNC":
-      return isPublicRoom(value.payload.room);
+      return (
+        isPublicRoom(value.payload.room) &&
+        value.payload.room.roomCode === value.roomCode &&
+        value.payload.room.stateVersion === value.stateVersion
+      );
     case "PLAYER_JOINED":
     case "PLAYER_RECONNECTED":
       return isPublicPlayer(value.payload.player);
