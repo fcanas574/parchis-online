@@ -9,14 +9,23 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from app.game.autoplayer import AutopilotPolicy, NoLegalMoveError
 from app.game.models import (
     AuthenticatedSession,
+    DomainEvent,
+    GameParticipant,
+    GameResult,
+    GameState,
+    GameTransition,
+    MoveOption,
+    PiecePosition,
     PlayerState,
     RoomChange,
     RoomCredentialData,
     RoomState,
     SessionIdentity,
 )
+from app.game.rules import GameRules, IllegalMoveError
 from app.repositories.room_repository import RoomCodeCollisionError, RoomRepository
 from app.schemas.rooms import PlayerColor, PlayerCount
 
@@ -60,12 +69,16 @@ class RoomManager:
         token_generator: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
         reservation_ttl_seconds: int = 600,
+        game_rules: GameRules | None = None,
+        autopilot: AutopilotPolicy | None = None,
     ) -> None:
         self._repository = repository
         self._code_generator = code_generator or self._generate_room_code
         self._token_generator = token_generator or self._generate_player_token
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._reservation_ttl_seconds = reservation_ttl_seconds
+        self._game_rules = game_rules or GameRules()
+        self._autopilot = autopilot or AutopilotPolicy()
         self._room_locks: dict[str, _RoomLockEntry] = {}
         self._locks_guard = asyncio.Lock()
 
@@ -116,6 +129,74 @@ class RoomManager:
                 await self._keep_lock(room_code, lock_entry)
                 return self._credentials(room_code, player_id, player_token, True)
 
+    async def create_practice_room(
+        self,
+        display_name: str,
+        player_count: PlayerCount,
+        color: PlayerColor | None,
+    ) -> RoomCredentialData:
+        normalized_name = self._validate_display_name(display_name)
+        if player_count not in (4, 5, 6):
+            raise RoomError(
+                "INVALID_PLAYER_COUNT",
+                "Player count must be 4, 5, or 6.",
+            )
+        selected_color = self._select_color(color, set())
+        host_id = self._generate_player_id()
+        host_token = self._token_generator()
+        bot_colors = [candidate for candidate in PLAYER_COLORS if candidate != selected_color]
+
+        while True:
+            room_code = self._code_generator()
+            self._validate_room_code(room_code)
+            async with self._locked_room(room_code) as lock_entry:
+                if await self._repository.get(room_code) is not None:
+                    continue
+
+                host = PlayerState(
+                    id=host_id,
+                    display_name=normalized_name,
+                    color=selected_color,
+                    seat_index=0,
+                    is_host=True,
+                    token_hash=hash_player_token(host_token),
+                    is_connected=True,
+                )
+                bots = [
+                    PlayerState(
+                        id=self._generate_player_id(),
+                        display_name=f"Bot {seat_index}",
+                        color=bot_colors[seat_index - 1],
+                        seat_index=seat_index,
+                        is_host=False,
+                        token_hash=secrets.token_hex(32),
+                        is_bot=True,
+                        is_ready=True,
+                    )
+                    for seat_index in range(1, player_count)
+                ]
+                players = [host, *bots]
+                room = RoomState(
+                    room_code=room_code,
+                    max_players=player_count,
+                    host_player_id=host_id,
+                    players=players,
+                    mode="practice",
+                    status="playing",
+                    created_at=self._now(),
+                    game_state=self._game_rules.new_game(
+                        room_code,
+                        [GameParticipant(player.id, player.seat_index) for player in players],
+                    ),
+                )
+                try:
+                    await self._repository.create(room)
+                except RoomCodeCollisionError:
+                    continue
+
+                await self._keep_lock(room_code, lock_entry)
+                return self._credentials(room_code, host_id, host_token, True)
+
     async def join_room(
         self,
         room_code: str,
@@ -129,6 +210,9 @@ class RoomManager:
             self._prune_expired(room)
             if not room.players:
                 raise RoomError("ROOM_NOT_FOUND", "Room not found.")
+
+            if room.mode == "practice":
+                raise RoomError("ROOM_NOT_JOINABLE", "Practice rooms do not accept guests.")
 
             if room.status != "lobby":
                 raise RoomError("ROOM_ALREADY_STARTED", "The room has already started.")
@@ -192,6 +276,7 @@ class RoomManager:
     def public_room_from_state(self, state: RoomState) -> dict:
         return {
             "roomCode": state.room_code,
+            "mode": state.mode,
             "status": state.status,
             "maxPlayers": state.max_players,
             "hostPlayerId": state.host_player_id,
@@ -202,6 +287,7 @@ class RoomManager:
                     "color": player.color,
                     "seatIndex": player.seat_index,
                     "isHost": player.is_host,
+                    "isBot": player.is_bot,
                     "isReady": player.is_ready,
                     "isConnected": player.is_connected,
                     "reservationExpiresAt": self._isoformat(
@@ -211,6 +297,86 @@ class RoomManager:
                 for player in sorted(state.players, key=lambda item: item.seat_index)
             ],
             "stateVersion": state.state_version,
+            "gameState": self._public_game_state(state.game_state),
+            "lastGameResult": self._public_game_result(state.last_game_result),
+        }
+
+    @classmethod
+    def _public_game_state(cls, game: GameState | None) -> dict | None:
+        if game is None:
+            return None
+        return {
+            "roomCode": game.room_code,
+            "seatCount": game.seat_count,
+            "status": game.status,
+            "playerOrder": list(game.player_order),
+            "currentPlayerId": game.current_player_id,
+            "turnPhase": game.turn_phase,
+            "diceValues": (
+                list(game.dice_values) if game.dice_values is not None else None
+            ),
+            "usedDiceIndices": list(game.used_dice_indices),
+            "availableMoves": [
+                cls._public_move_option(option) for option in game.available_moves
+            ],
+            "pendingBonuses": [
+                {
+                    "playerId": bonus.player_id,
+                    "steps": bonus.steps,
+                    "reason": bonus.reason,
+                }
+                for bonus in game.pending_bonuses
+            ],
+            "pieces": [
+                {
+                    "id": piece.id,
+                    "playerId": piece.player_id,
+                    "state": piece.state,
+                    "trackPosition": piece.track_position,
+                    "finishProgress": piece.finish_progress,
+                }
+                for piece in game.pieces
+            ],
+            "finishOrder": list(game.finish_order),
+            "winnerId": game.winner_id,
+            "result": cls._public_game_result(game.result),
+            "requiresSplitPlan": game.requires_split_plan,
+        }
+
+    @staticmethod
+    def _public_position(position: PiecePosition) -> dict[str, object]:
+        return {
+            "state": position.state,
+            "trackPosition": position.track_position,
+            "finishProgress": position.finish_progress,
+        }
+
+    @classmethod
+    def _public_move_option(cls, option: MoveOption) -> dict[str, object]:
+        return {
+            "pieceId": option.piece_id,
+            "diceIndices": list(option.dice_indices),
+            "steps": option.steps,
+            "destination": cls._public_position(option.destination),
+            "capturePieceId": option.capture_piece_id,
+            "completesPiece": option.completes_piece,
+            "captures": option.captures,
+            "landsSafe": option.lands_safe,
+            "leavesHome": option.leaves_home,
+            "progress": option.progress,
+            "completesSplitPlan": option.completes_split_plan,
+        }
+
+    @staticmethod
+    def _public_game_result(result: GameResult | None) -> dict | None:
+        if result is None:
+            return None
+        return {
+            "winnerId": result.winner_id,
+            "placements": [
+                {"playerId": placement.player_id, "rank": placement.rank}
+                for placement in result.placements
+            ],
         }
 
     async def authenticate(
@@ -227,6 +393,8 @@ class RoomManager:
                 raise self._unauthenticated()
             room = copy.deepcopy(persisted_room)
             pruned = self._prune_expired(room)
+            if pruned and room.game_state is not None:
+                await self._repository.save(room)
 
             player = next(
                 (
@@ -238,6 +406,10 @@ class RoomManager:
             )
             if player is None:
                 raise self._unauthenticated()
+            if player.is_bot:
+                raise self._unauthenticated()
+            if player.reservation_expired:
+                raise self._unauthenticated()
 
             is_reconnect = player.has_connected and not player.is_connected
             changed = (
@@ -248,6 +420,7 @@ class RoomManager:
             player.has_connected = True
             player.is_connected = True
             player.reservation_expires_at = None
+            player.reservation_expired = False
             if changed:
                 room.state_version += 1
             if pruned or changed:
@@ -274,6 +447,7 @@ class RoomManager:
             player.is_connected = False
             player.is_ready = False
             player.reservation_expires_at = expires_at
+            player.reservation_expired = False
             room.state_version += 1
             await self._repository.save(room)
             return self._snapshot_change(
@@ -353,6 +527,14 @@ class RoomManager:
                     "Every player must be ready before the game starts.",
                 )
 
+            room.game_state = self._game_rules.new_game(
+                room.room_code,
+                [
+                    GameParticipant(player.id, player.seat_index)
+                    for player in room.players
+                ],
+            )
+            room.last_game_result = None
             room.status = "playing"
             room.state_version += 1
             change = self._snapshot_change(
@@ -364,6 +546,273 @@ class RoomManager:
             self._cache_change(room, identity.player_id, request_id, change)
             await self._repository.save(room)
             return copy.deepcopy(change)
+
+    async def roll_dice(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+    ) -> RoomChange:
+        return await self._game_action(
+            session,
+            request_id,
+            lambda state, player_id: self._game_rules.roll_dice(state, player_id),
+        )
+
+    async def move_piece(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+        piece_id: str,
+        dice_indices: tuple[int, ...],
+    ) -> RoomChange:
+        return await self._game_action(
+            session,
+            request_id,
+            lambda state, player_id: self._game_rules.move_piece(
+                state,
+                player_id,
+                piece_id,
+                dice_indices,
+            ),
+        )
+
+    async def move_bonus_piece(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+        piece_id: str,
+    ) -> RoomChange:
+        return await self._game_action(
+            session,
+            request_id,
+            lambda state, player_id: self._game_rules.move_bonus_piece(
+                state,
+                player_id,
+                piece_id,
+            ),
+        )
+
+    async def return_to_lobby(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+    ) -> RoomChange:
+        return await self._reset_to_lobby(session, request_id, ready_requester=False)
+
+    async def play_again(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+    ) -> RoomChange:
+        identity = self._identity_from(session)
+        self._validate_room_code(identity.room_code)
+        self._validate_request_id(request_id)
+        async with self._locked_room(identity.room_code):
+            room = await self._require_room(identity.room_code)
+            if room.mode == "practice":
+                requester = self._require_player(room, identity.player_id)
+                if not requester.is_connected:
+                    raise self._unauthenticated()
+                cached = self._cached_change(room, requester.id, request_id)
+                if cached is not None:
+                    return cached
+                if room.status != "finished":
+                    raise RoomError("GAME_NOT_FINISHED", "The game must be finished before replay.")
+                room.game_state = self._game_rules.new_game(
+                    room.room_code,
+                    [GameParticipant(player.id, player.seat_index) for player in room.players],
+                )
+                room.status = "playing"
+                room.last_game_result = None
+                room.state_version += 1
+                change = self._snapshot_change(
+                    room,
+                    "GAME_STARTED",
+                    {"status": "playing"},
+                    request_id,
+                )
+                self._cache_change(room, requester.id, request_id, change)
+                await self._repository.save(room)
+                return copy.deepcopy(change)
+        return await self._reset_to_lobby(session, request_id, ready_requester=True)
+
+    async def run_autopilot_step(self, room_code: str) -> RoomChange | None:
+        self._validate_room_code(room_code)
+        async with self._locked_room(room_code):
+            room = await self._require_room(room_code)
+            pruned = self._prune_expired(room)
+            if room.status != "playing" or room.game_state is None:
+                if pruned:
+                    await self._repository.save(room)
+                return None
+
+            game = room.game_state
+            current_player = next(
+                (
+                    player
+                    for player in room.players
+                    if player.id == game.current_player_id
+                ),
+                None,
+            )
+            if current_player is None or (
+                current_player.is_connected and not current_player.is_bot
+            ):
+                if pruned:
+                    await self._repository.save(room)
+                return None
+
+            if game.turn_phase == "waiting_for_roll":
+                transition = self._game_rules.roll_dice(game, current_player.id)
+            elif game.turn_phase == "waiting_for_move":
+                try:
+                    option = self._autopilot.choose_move(game)
+                except NoLegalMoveError:
+                    if pruned:
+                        await self._repository.save(room)
+                    return None
+                transition = self._game_rules.move_piece(
+                    game,
+                    current_player.id,
+                    option.piece_id,
+                    option.dice_indices,
+                )
+            elif game.turn_phase == "waiting_for_bonus":
+                piece_id = self._autopilot.choose_bonus_move(game)
+                if piece_id is None:
+                    if pruned:
+                        await self._repository.save(room)
+                    return None
+                transition = self._game_rules.move_bonus_piece(
+                    game,
+                    current_player.id,
+                    piece_id,
+                )
+            else:
+                if pruned:
+                    await self._repository.save(room)
+                return None
+
+            change = self._apply_game_transition(room, transition)
+            await self._repository.save(room)
+            return copy.deepcopy(change)
+
+    async def _game_action(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+        action: Callable[[GameState, str], GameTransition],
+    ) -> RoomChange:
+        identity = self._identity_from(session)
+        self._validate_room_code(identity.room_code)
+        self._validate_request_id(request_id)
+        async with self._locked_room(identity.room_code):
+            room = await self._require_room(identity.room_code)
+            self._prune_expired(room)
+            player = self._require_player(room, identity.player_id)
+            if not player.is_connected:
+                raise self._unauthenticated()
+
+            cached = self._cached_change(room, identity.player_id, request_id)
+            if cached is not None:
+                return cached
+            if room.status != "playing" or room.game_state is None:
+                raise RoomError("GAME_NOT_ACTIVE", "The game is not active.")
+
+            try:
+                transition = action(room.game_state, player.id)
+            except IllegalMoveError as error:
+                raise RoomError("INVALID_GAME_ACTION", str(error)) from error
+
+            change = self._apply_game_transition(
+                room,
+                transition,
+                request_id=request_id,
+                player_id=player.id,
+            )
+            await self._repository.save(room)
+            return copy.deepcopy(change)
+
+    async def _reset_to_lobby(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+        *,
+        ready_requester: bool,
+    ) -> RoomChange:
+        identity = self._identity_from(session)
+        self._validate_room_code(identity.room_code)
+        self._validate_request_id(request_id)
+        async with self._locked_room(identity.room_code):
+            room = await self._require_room(identity.room_code)
+            self._prune_expired(room)
+            requester = self._require_player(room, identity.player_id)
+            if not requester.is_connected:
+                raise self._unauthenticated()
+            cached = self._cached_change(room, requester.id, request_id)
+            if cached is not None:
+                return cached
+            if room.status != "finished":
+                raise RoomError(
+                    "GAME_NOT_FINISHED",
+                    "The game must be finished before returning to the lobby.",
+                )
+            if room.mode == "practice":
+                raise RoomError("PRACTICE_NO_LOBBY", "Practice rooms have no lobby.")
+
+            if room.last_game_result is None and room.game_state is not None:
+                room.last_game_result = copy.deepcopy(room.game_state.result)
+            room.game_state = None
+            room.status = "lobby"
+            for player in room.players:
+                player.is_ready = False
+            if ready_requester:
+                requester.is_ready = True
+            room.state_version += 1
+            change = self._snapshot_change(
+                room,
+                "GAME_RESET",
+                {
+                    "status": "lobby",
+                    "requestedReplay": ready_requester,
+                    "requesterId": requester.id,
+                },
+                request_id,
+            )
+            self._cache_change(room, requester.id, request_id, change)
+            await self._repository.save(room)
+            return copy.deepcopy(change)
+
+    def _apply_game_transition(
+        self,
+        room: RoomState,
+        transition: GameTransition,
+        *,
+        request_id: str | None = None,
+        player_id: str | None = None,
+    ) -> RoomChange:
+        if not transition.events:
+            raise RuntimeError("Game transitions must include a semantic event.")
+        room.game_state = transition.state
+        if transition.state.status == "finished":
+            room.status = "finished"
+            if transition.state.result is not None:
+                room.last_game_result = copy.deepcopy(transition.state.result)
+        else:
+            room.status = "playing"
+
+        room.state_version += 1
+        primary, *additional = transition.events
+        change = self._snapshot_change(
+            room,
+            primary.type,
+            primary.payload,
+            request_id,
+            additional_events=tuple(additional),
+        )
+        if request_id is not None and player_id is not None:
+            self._cache_change(room, player_id, request_id, change)
+        return change
 
     async def prune_expired_reservations(self, room_code: str) -> None:
         self._validate_room_code(room_code)
@@ -390,6 +839,16 @@ class RoomManager:
         }
         if not expired_ids:
             return False
+
+        if room.game_state is not None:
+            changed = False
+            for player in room.players:
+                if player.id in expired_ids and not player.reservation_expired:
+                    player.reservation_expired = True
+                    changed = True
+            if changed:
+                room.state_version += 1
+            return changed
 
         host_expired = room.host_player_id in expired_ids
         room.players = [
@@ -427,7 +886,7 @@ class RoomManager:
             (candidate for candidate in room.players if candidate.id == player_id),
             None,
         )
-        if player is None:
+        if player is None or player.is_bot:
             raise RoomError("UNAUTHENTICATED", "Invalid room credentials.")
         return player
 
@@ -537,6 +996,8 @@ class RoomManager:
         event_type: str,
         payload: dict[str, object],
         request_id: str | None = None,
+        *,
+        additional_events: tuple[DomainEvent, ...] = (),
     ) -> RoomChange:
         state_snapshot = copy.deepcopy(room)
         state_snapshot.processed_changes.clear()
@@ -545,6 +1006,7 @@ class RoomManager:
             event_type=event_type,
             payload=copy.deepcopy(payload),
             request_id=request_id,
+            additional_events=copy.deepcopy(additional_events),
         )
 
     @staticmethod

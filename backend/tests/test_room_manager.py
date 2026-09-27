@@ -5,11 +5,13 @@ from itertools import count
 import pytest
 from pydantic import ValidationError
 
-from app.game.models import SessionIdentity
+from app.game.models import GameResult, PendingBonus, PlayerPlacement, SessionIdentity
+from app.game.rules import GameRules
 from app.repositories.memory_room_repository import MemoryRoomRepository
 from app.repositories.room_repository import RoomCodeCollisionError
 from app.schemas.rooms import CreateRoomRequest, RoomCredentials
-from app.services.room_manager import RoomError, RoomManager
+from app.services.room_manager import RoomError, RoomManager, hash_player_token
+from game_support import create_ready_room, make_game_state
 
 
 def make_room_manager(clock, reservation_ttl_seconds=600):
@@ -21,6 +23,185 @@ def make_room_manager(clock, reservation_ttl_seconds=600):
         clock=clock,
         reservation_ttl_seconds=reservation_ttl_seconds,
     )
+
+
+@pytest.mark.parametrize("player_count", [4, 5, 6])
+@pytest.mark.asyncio
+async def test_create_practice_room_fills_seats_and_starts_game(clock, player_count):
+    manager = make_room_manager(clock)
+
+    host = await manager.create_practice_room("Felipe", player_count, "purple")
+    room = await manager.get_room(host.room_code)
+    snapshot = await manager.public_room(host.room_code)
+
+    assert room.mode == "practice"
+    assert room.status == "playing"
+    assert len(room.players) == player_count
+    assert [player.seat_index for player in room.players] == list(range(player_count))
+    assert len({player.color for player in room.players}) == player_count
+    assert len({player.display_name.casefold() for player in room.players}) == player_count
+    assert room.players[0].id == host.player_id
+    assert room.players[0].is_bot is False
+    assert all(player.is_bot for player in room.players[1:])
+    assert all(not player.is_connected for player in room.players[1:])
+    assert all(player.reservation_expires_at is None for player in room.players[1:])
+    assert room.game_state is not None
+    assert room.game_state.player_order == [player.id for player in room.players]
+    assert snapshot["mode"] == "practice"
+    assert [player["isBot"] for player in snapshot["players"]] == [False] + [True] * (player_count - 1)
+    assert (await manager.authenticate(host.room_code, host.player_token)).identity.player_id == host.player_id
+
+
+@pytest.mark.asyncio
+async def test_practice_rejects_join_and_bot_identity(clock):
+    repository = MemoryRoomRepository()
+    manager = RoomManager(
+        repository=repository,
+        code_generator=lambda: "AB7K2",
+        token_generator=lambda: "human-token",
+        clock=clock,
+    )
+    host = await manager.create_practice_room("Felipe", 4, "green")
+    room = await manager.get_room(host.room_code)
+    bot = room.players[1]
+    bot.token_hash = hash_player_token("guessed-bot-token")
+    await repository.save(room)
+
+    with pytest.raises(RoomError) as cannot_join:
+        await manager.join_room(host.room_code, "Guest", "blue")
+    assert cannot_join.value.code == "ROOM_NOT_JOINABLE"
+
+    with pytest.raises(RoomError) as cannot_authenticate:
+        await manager.authenticate(host.room_code, "guessed-bot-token")
+    assert cannot_authenticate.value.code == "UNAUTHENTICATED"
+
+    with pytest.raises(RoomError) as cannot_act:
+        await manager.set_ready(SessionIdentity(host.room_code, bot.id), True, "bot-ready")
+    assert cannot_act.value.code == "UNAUTHENTICATED"
+
+
+@pytest.mark.asyncio
+async def test_practice_code_collision_retries_atomically(clock):
+    room_codes = iter(("AB7K2", "AB7K2", "CD3E4"))
+    manager = RoomManager(
+        repository=MemoryRoomRepository(),
+        code_generator=lambda: next(room_codes),
+        token_generator=lambda: "human-token",
+        clock=clock,
+    )
+
+    first = await manager.create_practice_room("Felipe", 4, "green")
+    second = await manager.create_practice_room("Ana", 4, "red")
+
+    assert first.room_code == "AB7K2"
+    assert second.room_code == "CD3E4"
+    assert (await manager.get_room(first.room_code)).players[0].id == first.player_id
+    assert (await manager.get_room(second.room_code)).players[0].id == second.player_id
+
+
+@pytest.mark.asyncio
+async def test_practice_bot_uses_server_dice_and_only_legal_moves(room_manager, room_repository):
+    credentials = await room_manager.create_practice_room("Felipe", 4, "green")
+    room = await room_manager.get_room(credentials.room_code)
+    bot_id = room.players[1].id
+    assert room.game_state is not None
+    room.game_state.current_player_id = bot_id
+    room.players[1].is_connected = True  # A bot is always automated, regardless of presence flags.
+    await room_repository.save(room)
+
+    rolled = await room_manager.run_autopilot_step(credentials.room_code)
+
+    assert rolled is not None
+    assert rolled.event_type == "DICE_ROLLED"
+    assert rolled.payload["playerId"] == bot_id
+    assert rolled.payload["values"] == (5, 2)
+    assert rolled.state.game_state is not None
+    legal_options = rolled.state.game_state.available_moves
+    assert legal_options
+
+    moved = await room_manager.run_autopilot_step(credentials.room_code)
+
+    assert moved is not None
+    assert moved.event_type == "PIECE_MOVED"
+    assert any(
+        option.piece_id == moved.payload["pieceId"]
+        and option.dice_indices == moved.payload["diceIndices"]
+        for option in legal_options
+    )
+
+
+@pytest.mark.asyncio
+async def test_practice_bot_uses_only_offered_bonus_move(room_manager, room_repository):
+    credentials = await room_manager.create_practice_room("Felipe", 4, "green")
+    room = await room_manager.get_room(credentials.room_code)
+    game = room.game_state
+    assert game is not None
+    bot_id = room.players[1].id
+    game.current_player_id = bot_id
+    game.turn_phase = "waiting_for_bonus"
+    game.dice_values = (5, 2)
+    game.used_dice_indices = [0, 1]
+    game.pending_bonuses = [PendingBonus(bot_id, 20, "capture")]
+    bot_piece = next(piece for piece in game.pieces if piece.player_id == bot_id)
+    bot_piece.state = "track"
+    bot_piece.track_position = 20
+    game.available_moves = list(GameRules().available_bonus_moves(game))
+    assert game.available_moves
+    legal_piece_ids = {option.piece_id for option in game.available_moves}
+    await room_repository.save(room)
+
+    change = await room_manager.run_autopilot_step(credentials.room_code)
+
+    assert change is not None
+    assert change.event_type == "PIECE_MOVED"
+    assert change.payload["pieceId"] in legal_piece_ids
+
+
+@pytest.mark.asyncio
+async def test_play_again_restarts_practice_with_same_seats_and_colors(
+    room_manager,
+    room_repository,
+):
+    credentials = await room_manager.create_practice_room("Felipe", 5, "purple")
+    room = await room_manager.get_room(credentials.room_code)
+    original_seats = [(player.id, player.color) for player in room.players]
+    room.status = "finished"
+    assert room.game_state is not None
+    room.game_state.status = "finished"
+    room.game_state.current_player_id = None
+    await room_repository.save(room)
+
+    change = await room_manager.play_again(
+        SessionIdentity(credentials.room_code, credentials.player_id),
+        "again-practice",
+    )
+
+    assert change.event_type == "GAME_STARTED"
+    assert change.state.mode == "practice"
+    assert change.state.status == "playing"
+    assert [(player.id, player.color) for player in change.state.players] == original_seats
+    assert change.state.game_state is not None
+    assert change.state.game_state.current_player_id == credentials.player_id
+    assert change.state.game_state.finish_order == []
+
+
+@pytest.mark.asyncio
+async def test_practice_cannot_return_to_a_lobby_that_cannot_start(room_manager, room_repository):
+    credentials = await room_manager.create_practice_room("Felipe", 4, "green")
+    room = await room_manager.get_room(credentials.room_code)
+    room.status = "finished"
+    assert room.game_state is not None
+    room.game_state.status = "finished"
+    await room_repository.save(room)
+
+    with pytest.raises(RoomError) as error:
+        await room_manager.return_to_lobby(
+            SessionIdentity(credentials.room_code, credentials.player_id),
+            "lobby-practice",
+        )
+
+    assert error.value.code == "PRACTICE_NO_LOBBY"
+    assert (await room_manager.get_room(credentials.room_code)).status == "finished"
 
 
 @pytest.mark.asyncio
@@ -469,11 +650,14 @@ async def test_public_room_has_only_v1_public_fields(room_manager):
 
     assert set(public) == {
         "roomCode",
+        "mode",
         "status",
         "maxPlayers",
         "hostPlayerId",
         "players",
         "stateVersion",
+        "gameState",
+        "lastGameResult",
     }
     assert set(public["players"][0]) == {
         "id",
@@ -481,11 +665,143 @@ async def test_public_room_has_only_v1_public_fields(room_manager):
         "color",
         "seatIndex",
         "isHost",
+        "isBot",
         "isReady",
         "isConnected",
         "reservationExpiresAt",
     }
+    assert public["mode"] == "friends"
+    assert public["players"][0]["isBot"] is False
     assert "token" not in repr(public).casefold()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seat_count", [4, 5, 6])
+async def test_start_creates_game_and_public_snapshot(room_manager, seat_count):
+    credentials = await create_ready_room(room_manager, seat_count)
+    room_code = credentials[0].room_code
+    identity = SessionIdentity(room_code, credentials[0].player_id)
+
+    change = await room_manager.start_game(identity, f"start-{seat_count}")
+    public = room_manager.public_room_from_state(change.state)
+
+    assert change.state.game_state.current_player_id == credentials[0].player_id
+    assert change.state.game_state.player_order == [
+        player.player_id for player in credentials
+    ]
+    assert len(public["gameState"]["pieces"]) == seat_count * 4
+    assert public["lastGameResult"] is None
+    assert "token_hash" not in repr(public)
+
+
+@pytest.mark.asyncio
+async def test_expired_game_token_keeps_seat_and_cannot_reconnect(
+    room_manager,
+    room_repository,
+    clock,
+):
+    credentials = await create_ready_room(room_manager, 4)
+    identity = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+    await room_manager.start_game(identity, "start")
+    finished = await room_manager.get_room(identity.room_code)
+    finished.status = "finished"
+    finished.game_state.status = "finished"
+    finished.game_state.turn_phase = "finished"
+    finished.game_state.current_player_id = None
+    await room_repository.save(finished)
+    await room_manager.disconnect(identity)
+
+    clock.advance(seconds=601)
+    await room_manager.prune_expired_reservations(identity.room_code)
+    expired_version = (await room_manager.get_room(identity.room_code)).state_version
+    room = await room_manager.get_room(identity.room_code)
+
+    assert room.status == "finished"
+    assert len(room.players) == 4
+    assert room.players[0].id == credentials[0].player_id
+    assert room.players[0].reservation_expired is True
+    assert room.state_version == expired_version
+    with pytest.raises(RoomError, match="Invalid room credentials"):
+        await room_manager.authenticate(identity.room_code, credentials[0].player_token)
+
+
+@pytest.mark.asyncio
+async def test_play_again_preserves_result_and_seats_and_readies_requester(
+    room_manager,
+    room_repository,
+):
+    credentials = await create_ready_room(room_manager, 4)
+    room_code = credentials[0].room_code
+    room = await room_manager.get_room(room_code)
+    room.status = "finished"
+    room.game_state = make_game_state(turn_phase="finished")
+    room.game_state.status = "finished"
+    room.game_state.current_player_id = None
+    room.last_game_result = GameResult(
+        winner_id=credentials[0].player_id,
+        placements=[
+            PlayerPlacement(player.player_id, rank)
+            for rank, player in enumerate(credentials, start=1)
+        ],
+    )
+    await room_repository.save(room)
+
+    change = await room_manager.play_again(
+        SessionIdentity(room_code, credentials[0].player_id),
+        "again",
+    )
+
+    assert change.event_type == "GAME_RESET"
+    assert change.payload == {
+        "status": "lobby",
+        "requestedReplay": True,
+        "requesterId": credentials[0].player_id,
+    }
+    assert change.state.status == "lobby"
+    assert change.state.game_state is None
+    assert change.state.last_game_result is not None
+    assert [player.id for player in change.state.players] == [
+        player.player_id for player in credentials
+    ]
+    assert change.state.players[0].is_ready
+    assert all(not player.is_ready for player in change.state.players[1:])
+
+
+@pytest.mark.asyncio
+async def test_return_to_lobby_preserves_result_and_resets_readiness(
+    room_manager,
+    room_repository,
+):
+    credentials = await create_ready_room(room_manager, 4)
+    room_code = credentials[0].room_code
+    room = await room_manager.get_room(room_code)
+    room.status = "finished"
+    room.game_state = make_game_state(turn_phase="finished")
+    room.game_state.status = "finished"
+    room.game_state.current_player_id = None
+    room.last_game_result = GameResult(
+        winner_id=credentials[0].player_id,
+        placements=[
+            PlayerPlacement(player.player_id, rank)
+            for rank, player in enumerate(credentials, start=1)
+        ],
+    )
+    await room_repository.save(room)
+
+    change = await room_manager.return_to_lobby(
+        SessionIdentity(room_code, credentials[0].player_id),
+        "return",
+    )
+
+    assert change.payload == {
+        "status": "lobby",
+        "requestedReplay": False,
+        "requesterId": credentials[0].player_id,
+    }
+    assert change.state.status == "lobby"
+    assert change.state.game_state is None
+    assert change.state.last_game_result is not None
+    assert all(not player.is_ready for player in change.state.players)
 
 
 @pytest.mark.asyncio

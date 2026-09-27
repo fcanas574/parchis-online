@@ -1,28 +1,46 @@
 # Parchís Online protocol v1
 
-These JSON Schemas define the versioned, camelCase wire boundary between the authoritative backend and clients. Client commands are `RECONNECT`, `PLAYER_READY`, and `START_GAME`; mutating commands carry a non-empty `requestId` for correlation and safe retry handling.
+These schemas define the camelCase WebSocket boundary for lobby and gameplay. The backend is authoritative: clients send intents, never dice outcomes, piece destinations, captures, or turn decisions. Unknown fields are rejected, and every message uses `version: 1`.
 
-Server events are envelopes with a room code, monotonically increasing `stateVersion`, unique `eventId`, and server-generated ISO timestamp. Their payloads are:
+## Client commands
 
-- `PLAYER_JOINED`: `{ player }`, with the joining public player record.
-- `PLAYER_LEFT`: `{ playerId, reservationExpiresAt }`, identifying the disconnected player and the end of their seat reservation.
-- `PLAYER_RECONNECTED`: `{ player }`, with the player record after reclaiming their reserved seat.
-- `PLAYER_READY`: `{ playerId, ready }`, carrying the player readiness transition.
-- `GAME_STARTED`: `{ status: "playing" }`, announcing the lobby-to-game transition.
-- `GAME_STATE_SYNC`: `{ room }`, carrying the closed public room snapshot; an empty room object is permitted for the bootstrap fixture.
-- `ERROR`: `{ code, message }`, with an optional envelope `requestId` to correlate a rejected command.
+`protocol.schema.json` describes the accepted client messages:
 
-Public room state contains `roomCode`, `status`, `maxPlayers`, `hostPlayerId`, `players`, and `stateVersion`. Each public player contains `id`, `displayName`, `color`, `seatIndex`, `isHost`, `isReady`, `isConnected`, and nullable `reservationExpiresAt`. A disconnected player keeps their seat during the reservation window; `PLAYER_LEFT` communicates that expiry to clients. Player tokens are private credentials and never belong in public room state.
+- `RECONNECT`: `{ roomCode, playerToken }`. The token is private and is sent only by its owner.
+- `PLAYER_READY`: `{ requestId, ready }`.
+- `START_GAME`: `{ requestId }`.
+- `ROLL_DICE`: `{ requestId }`.
+- `MOVE_PIECE`: `{ requestId, pieceId, diceIndices }`. Dice indices are unique values from `0` or `1`; game rules validate whether the requested combination is legal.
+- `MOVE_BONUS_PIECE`: `{ requestId, pieceId }`.
+- `RETURN_TO_LOBBY`: `{ requestId }`.
+- `PLAY_AGAIN`: `{ requestId }`.
 
-The v1 lobby boundary includes join/leave/reconnect/readiness, game-start notification, state sync, and structured errors. Future gameplay commands/events and social features are reserved for later phases and are intentionally not part of this client behavior.
+All commands except `RECONNECT` carry a non-empty `requestId` (maximum 64 characters) for correlation and safe retries. The server authenticates the connection and derives the acting player from it; clients do not choose a player ID for commands.
 
-## Guarantees covered by Phase 1
+## Server event envelope
 
-- Room creation accepts a capacity of 4, 5, or 6 players. Public `seatIndex` values are contiguous, and a color can be assigned to only one seat in a room. A join after capacity is reached fails with HTTP 409 and `ROOM_FULL`.
-- Every accepted lobby mutation increments `stateVersion` once. Its semantic event and following `GAME_STATE_SYNC` use that same version, and every connected client receives the same public snapshot for that mutation.
-- A client must ignore snapshots older than the newest `stateVersion` it has already applied. The frontend store enforces this rule.
-- `playerToken` is returned only to the player that creates or joins a room. It is not included in public HTTP room state or WebSocket events; `token_hash` remains backend-only.
-- A disconnected seat is reserved for ten minutes. Reconnecting with the original token during that window restores the same player ID, seat, and color. Once the reservation expires, the token can no longer authenticate that seat.
-- The Phase 1 WebSocket client commands are only `RECONNECT`, `PLAYER_READY`, and `START_GAME`. Gameplay and social events listed in the product brief are deferred; unsupported commands return a structured `ERROR` without changing room state.
+Every event includes `type`, `version`, `roomCode`, `eventId`, `serverTime`, `stateVersion`, and `payload`. `requestId` is included when an event responds to a specific command. `stateVersion` increases with each accepted room/game mutation; clients should ignore an older snapshot after applying a newer version.
 
-These guarantees are exercised by `backend/tests/test_websocket_flow.py` and `frontend/src/stores/gameStore.test.ts`. The v1 boundary remains intentionally small until the game rules and board arrive in Phase 2.
+`server-events.schema.json` documents these event payloads:
+
+- Lobby: `PLAYER_JOINED { player }`, `PLAYER_LEFT { playerId, reservationExpiresAt }`, `PLAYER_RECONNECTED { player }`, `PLAYER_READY { playerId, ready }`, `GAME_STARTED { status }`.
+- Turn flow: `TURN_STARTED { playerId }`, `DICE_ROLLED { playerId, values, availableMoves }`, `PIECE_MOVED { pieceId, from, to, diceIndices }`, `PIECE_CAPTURED { capturedPieceId, byPieceId, bonusSteps }`, `BONUS_GRANTED { playerId, steps, reason }`, `BONUS_SKIPPED { playerId, steps, reason, skipReason }`, `TURN_ENDED { playerId, extraTurn }`.
+- Results and recovery: `PLAYER_FINISHED { playerId, rank }`, `GAME_FINISHED { winnerId, finishOrder, placements }`, `GAME_RESET { status, requestedReplay, requesterId }`, `GAME_STATE_SYNC { room, game }`.
+- Rejections: `ERROR { code, message }`.
+
+`GAME_STATE_SYNC` is the recovery boundary for initial connection and reconnection. `room` always contains the public room snapshot, including nullable `gameState` and `lastGameResult`; `game` is the current public game state or `null`. Public snapshots contain no player tokens or token hashes. Disconnected seats remain reserved during the configured reconnection window and can be reclaimed only with the original player token.
+
+## Public state and rules
+
+The public room record contains `roomCode`, `status`, `maxPlayers`, `hostPlayerId`, `players`, `stateVersion`, `gameState`, and `lastGameResult`. Player records expose identity, display name, color, seat index, host/readiness/connection flags, and nullable reservation expiry—never authentication credentials.
+
+The public game state carries seat count, player order, current turn and phase, server-generated dice, legal move options, pending bonuses, piece positions, finish order, winner/result, and split-plan status. Board geometry is not part of the protocol; clients map logical piece positions to their own SVG layout. Game variants such as bonus steps and safe-cell rules are enforced by the backend.
+
+## MVP guarantees
+
+- Rooms support 4, 5, or 6 seats. The same authoritative game module validates turns, dice, movement, captures, safe cells, finish paths, bonuses, placement, and victory independently of FastAPI/WebSockets.
+- Clients send actions as intents; the server validates each action again before changing state and broadcasting semantic events plus a public state sync.
+- A dropped connection does not immediately free a seat. Reconnection restores the same player identity and seat during the reservation window.
+- Chat, emoji/reaction sounds, gifts, public matchmaking, monetization, and persistent statistics are not part of gameplay protocol v1.
+
+The schemas are exercised by `backend/tests/test_protocol_schemas.py`; room and WebSocket integration behavior is covered by the backend test suite.

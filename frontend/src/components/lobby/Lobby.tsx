@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useGameSocket } from "@/hooks/useGameSocket";
+import type { GameSocketActions } from "@/hooks/useGameSocket";
 import { useGameStore, type ConnectionState } from "@/stores/gameStore";
 import { Card } from "@/components/ui/card";
 import { PlayerList } from "./PlayerList";
@@ -17,12 +17,18 @@ const connectionCopy: Record<ConnectionState, string> = {
   error: "La conexión necesita atención.",
 };
 
-export function Lobby({ roomCode }: { roomCode: string }) {
+export function Lobby({
+  roomCode,
+  actions,
+}: {
+  roomCode: string;
+  actions: Pick<GameSocketActions, "sendReady" | "sendStartGame">;
+}) {
   const room = useGameStore((state) => state.room);
   const session = useGameStore((state) => state.session);
   const connectionState = useGameStore((state) => state.connectionState);
   const lastError = useGameStore((state) => state.lastError);
-  const { sendReady, sendStartGame } = useGameSocket(roomCode);
+  const { sendReady, sendStartGame } = actions;
   const authenticationFailed = lastError?.code === "UNAUTHENTICATED";
 
   const bannerCopy = authenticationFailed
@@ -65,15 +71,15 @@ export function Lobby({ roomCode }: { roomCode: string }) {
     );
   }
 
-  if (room.status === "playing") {
+  if (room.status !== "lobby") {
     return (
       <main className="app-shell lobby-shell">
         <div className="lobby-stage">
           {connectionBanner}
           <Card className="phase-panel" role="status">
             <p className="eyebrow">Sala {roomCode}</p>
-            <h1>La partida ya comenzó</h1>
-            <p>Partida iniciada; el tablero se incorporará en la siguiente fase</p>
+            <h1>Sincronizando la partida</h1>
+            <p>La sala ya comenzó. Estamos recuperando el estado actual del tablero…</p>
           </Card>
         </div>
       </main>

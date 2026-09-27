@@ -5,8 +5,13 @@ from pydantic import TypeAdapter, ValidationError
 from app.game.models import RoomChange, SessionIdentity
 from app.schemas.websocket import (
     ClientMessage,
+    MoveBonusPieceCommand,
+    MovePieceCommand,
+    PlayAgainCommand,
     PlayerReadyCommand,
     ReconnectCommand,
+    ReturnToLobbyCommand,
+    RollDiceCommand,
     StartGameCommand,
 )
 from app.services.room_manager import RoomError, RoomManager
@@ -71,6 +76,44 @@ class CommandRouter:
                 )
             elif isinstance(command, StartGameCommand):
                 change = await self._room_manager.start_game(
+                    context.identity,
+                    command.request_id,
+                )
+            elif isinstance(command, RollDiceCommand):
+                change = await self._room_manager.roll_dice(
+                    context.identity,
+                    command.request_id,
+                )
+            elif isinstance(command, MovePieceCommand):
+                dice_indices = tuple(command.dice_indices)
+                if dice_indices not in ((0,), (1,), (0, 1)):
+                    return [
+                        await self._error_change(
+                            context,
+                            "INVALID_MESSAGE",
+                            "Dice indices must be [0], [1], or [0, 1].",
+                            command.request_id,
+                        )
+                    ]
+                change = await self._room_manager.move_piece(
+                    context.identity,
+                    command.request_id,
+                    command.piece_id,
+                    dice_indices,
+                )
+            elif isinstance(command, MoveBonusPieceCommand):
+                change = await self._room_manager.move_bonus_piece(
+                    context.identity,
+                    command.request_id,
+                    command.piece_id,
+                )
+            elif isinstance(command, ReturnToLobbyCommand):
+                change = await self._room_manager.return_to_lobby(
+                    context.identity,
+                    command.request_id,
+                )
+            elif isinstance(command, PlayAgainCommand):
+                change = await self._room_manager.play_again(
                     context.identity,
                     command.request_id,
                 )

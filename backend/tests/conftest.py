@@ -8,7 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest
 
 from app.game.models import RoomState
+from app.game.rules import GameRules
 from app.repositories.memory_room_repository import MemoryRoomRepository
+from game_support import SequenceDice
 
 
 class ControllableClock:
@@ -75,4 +77,5 @@ def room_manager(
         token_generator=token_generator,
         clock=clock,
         reservation_ttl_seconds=reservation_ttl_seconds,
+        game_rules=GameRules(dice=SequenceDice([(5, 2)] * 40)),
     )

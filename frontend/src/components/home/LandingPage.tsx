@@ -104,6 +104,9 @@ export function LandingPage({
   const createNameRef = useRef<HTMLInputElement>(null);
   const joinNameRef = useRef<HTMLInputElement>(null);
   const roomCodeRef = useRef<HTMLInputElement>(null);
+  const practiceTapCountRef = useRef(0);
+  const practiceTapStartedAtRef = useRef<number | null>(null);
+  const practiceOpenedRef = useRef(false);
   const [mode, setMode] = useState<Mode>(initialMode);
   const [createName, setCreateName] = useState("");
   const [playerCount, setPlayerCount] = useState<4 | 5 | 6>(4);
@@ -208,18 +211,41 @@ export function LandingPage({
     setErrorField(null);
   };
 
+  const activatePracticeEntry = () => {
+    if (practiceOpenedRef.current) return;
+
+    const now = Date.now();
+    const startedAt = practiceTapStartedAtRef.current;
+    if (startedAt === null || now - startedAt > 2_000) {
+      practiceTapStartedAtRef.current = now;
+      practiceTapCountRef.current = 0;
+    }
+
+    practiceTapCountRef.current += 1;
+    if (practiceTapCountRef.current === 5) {
+      practiceOpenedRef.current = true;
+      router.push("/practice");
+    }
+  };
+
   return (
     <main className="app-shell landing-shell">
       <section className="landing-stage" aria-labelledby="landing-title">
         <div className="landing-intro">
-          <div className="room-seal" aria-hidden="true">
+          <button
+            aria-label="Práctica: abrir con cinco toques rápidos"
+            className="room-seal"
+            onClick={activatePracticeEntry}
+            type="button"
+          >
             {colors.map((color) => (
               <span
+                aria-hidden="true"
                 key={color.value}
                 style={{ backgroundColor: `var(--color-piece-${color.value})` }}
               />
             ))}
-          </div>
+          </button>
           <p className="eyebrow">Mesa privada · 4–6 amigos</p>
           <h1 id="landing-title" className="display-title">
             PARCHÍS ONLINE

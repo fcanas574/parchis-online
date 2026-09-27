@@ -16,6 +16,7 @@
 |---|---|---|---|
 | Permission model (host/start, player/ready) | `docs/superpowers/specs/2026-09-14-parchis-online-design.md` §§7–10; `contracts/v1/README.md` | Product spec / protocol contract | 2026-09-24 |
 | Room/session lifecycle | `docs/superpowers/specs/2026-09-14-parchis-online-design.md` §§4, 8, 10; `frontend/src/lib/session.ts` | Product spec / implemented session boundary | 2026-09-24 |
+| Turn, movement, capture, blockade, and finish policy | `docs/superpowers/specs/2026-09-14-parchis-online-design.md` §5 | Approved product rule contract | 2026-09-26 |
 | Authoritative lobby state | `contracts/v1/server-events.schema.json`; `frontend/src/types/game.ts` | Protocol / client type contract | 2026-09-24 |
 | Billing / payment | Explicitly excluded by product spec §1 | Product spec | 2026-09-24 |
 | Legal / regulatory copy | Not applicable to Phase 1 | Scope decision | 2026-09-24 |
@@ -40,6 +41,7 @@
 | Scrollbar | `frontend/src/app/globals.css` | `DESIGN.md` | stable-gutter geometry only | premium audit + browser computed style |
 | Status feedback | Inline `role=status` / `role=alert` regions | This contract | connection / API / clipboard | component tests + browser exercise |
 | Room lifecycle | `createRoom`, `joinRoom`, `saveSession`, `useGameSocket` | API/protocol contracts | create / join / reconnect / direct invitation | component + multi-tab flow |
+| Movement chooser | `Board` inside the fixed board stage | Product spec §5 + authoritative `availableMoves` | direct move for one legal option; anchored numeric chooser for multiple | component tests + keyboard/browser exercise |
 
 ## Component behavior
 
@@ -77,15 +79,27 @@ The player list is bounded to 4–6 server-provided records and renders all, sor
 - Truncation/full-value access: Names wrap; room code and invite URL remain selectable and wrap safely.
 - Focus restoration and sticky-obstruction policy: No sticky chrome. Route headings receive programmatic focus only if a future router-level focus owner is added; current controls remain unobscured.
 
+## Gameplay presentation
+
+- The local seat's color arm is shown at the bottom and its start cell is labeled 5; this changes only the board projection, never the server's logical cell indices.
+- Player names sit in perimeter rows aligned with their rotated home zones. The active seat alone shows the dice pair; another player's dice cannot be clicked locally.
+- The active seat highlight, its dice, and a screen-reader-only live announcement identify whose turn it is. Do not add a visible turn-description panel or phase copy that shifts the board or creates scrolling.
+- A piece with one authoritative legal move moves when tapped. If that piece has multiple legal moves, show a small, non-modal chooser directly above the piece with only the relevant rolled values (for example `5`, `2`, or `5+2`). It is absolutely positioned within the board stage and must not reflow the page. Escape closes it and restores focus to the piece; an outside tap or scroll dismisses it.
+- A piece that reaches the finish remains logically `finished` and is drawn in a stable slot inside its owner's colored goal wedge. It must not return to the yard or occupy the shared center.
+- Normal safe cells show a star. Game-rule exceptions, shared-cell capacity, captures, and blockade behavior follow the authoritative product spec §5; the client only presents server-approved moves.
+- The roll control sends `ROLL_DICE` without a client result. Every client animates the same `DICE_ROLLED` event briefly and then reveals its two server values. `GAME_STATE_SYNC` restores the values after reconnection without generating a new roll.
+- A typical 390 × 844 phone viewport shows the complete play surface without document scrolling. Short viewports, zoom, and enlarged text may scroll naturally rather than clip controls.
+- Phase 3 may add free dice and piece skins; appearance never changes movement rules, permissions, or game state authority.
+
 ## Overlays and feedback
 
-- Dialog primitive: None in Task 9.
+- Dialog primitive: No modal is used for piece movement; the chooser is a non-modal, board-anchored popover.
 - Destructive confirmation levels: No destructive actions in Task 9.
 - Toast placement/duration/deduplication: No toast system; copy and API feedback are inline and scoped.
 - Alert/banner scope and persistence: Connection status is a room banner; “Sala sincronizada” means the authoritative `GAME_STATE_SYNC` arrived, not merely that the WebSocket opened. API and clipboard failures persist beside their triggering control until retry/success.
 - Tooltip delay/dismissal: No tooltip-only content.
 - Unsaved-changes behavior: Not required; landing form values are transient and remain on API failure.
-- Layer/z-index contract: No overlays in Task 9.
+- Layer/z-index contract: `--z-popover` (`300`) for the movement chooser inside `.parchis-board-stage`; the stage owns its stacking context and chooser placement never affects layout.
 
 ## Async and resilience
 

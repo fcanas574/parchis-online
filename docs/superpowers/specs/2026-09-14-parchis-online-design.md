@@ -163,9 +163,13 @@ Las operaciones reciben el estado y los datos de dominio necesarios, validan inv
 
 Un resultado de movimiento puede incluir la ficha movida, origen y destino lógicos, fichas capturadas, si entró en pasillo final, si terminó una ficha y si el jugador ganó. Si una captura genera bonus, pending_bonus_steps toma capture_bonus_steps y el mismo jugador pasa a waiting_for_bonus_piece. Puede escoger cualquier ficha propia con un movimiento legal usando ese valor; después se limpia el bonus y se aplica la regla de turno del lanzamiento original. Si ninguna ficha puede usar el bonus, se descarta y se aplica directamente la regla de turno. La generación del dado dependerá de una interfaz DiceRoller: producción usa aleatoriedad segura del servidor y los tests inyectan valores deterministas.
 
-Con allow_blockades activo, una barrera contiene blockade_size o más fichas del mismo jugador en una casilla común. Ninguna ficha puede atravesar una barrera; una ficha rival tampoco puede aterrizar en ella. Una captura solo ocurre contra una ficha rival en una casilla no segura y que no forme una barrera. Con allow_blockades desactivado, se ignoran esas restricciones.
+En el recorrido compartido nunca puede haber más de dos fichas en una misma casilla, incluidas las casillas seguras. Una barrera contiene blockade_size fichas del mismo jugador en una casilla común. Ninguna ficha puede atravesar una barrera rival ni aterrizar normalmente en ella; su dueño puede romperla moviendo una ficha, y al sacar dobles la salida de la barrera usa uno de los dados según la configuración. Con allow_blockades desactivado, se ignoran las restricciones de barrera, pero se conserva la capacidad máxima de dos fichas por casilla.
 
-Con triple_six_rule igual a return_last_piece_home, tres seises consecutivos del mismo jugador en la secuencia de turnos hacen que la última ficha movida por ese jugador vuelva a home. Con none no existe esa penalización. La partida termina en MVP 1 cuando un jugador coloca sus cuatro fichas en finished; winner_ids conserva a ese ganador como primer elemento para permitir clasificaciones múltiples en una versión futura.
+En una jugada normal, una casilla segura impide capturas. Cada asiento tiene su propia casilla segura de salida (`start_cells_by_seat`); no hay una única salida compartida. Al sacar una ficha del patio, si solo hay una ficha rival en esa salida, no se captura y ambas fichas pueden compartirla. Si ya hay dos fichas en la casilla y al menos una es rival, la salida captura a la ficha rival que llegó más recientemente y concede el bonus habitual de `capture_bonus_steps` (20 por defecto). Esto aplica tanto a dos rivales (sean del mismo color o distintos) como a una ficha propia junto a una rival. Después de la captura, la casilla queda con dos fichas como máximo; si las dos fichas que ya están allí son propias, el bloqueo impide salir.
+
+Si una ficha permanece en el patio y existe una salida legal usando un valor total de 5, esa salida es obligatoria antes que cualquier movimiento ordinario. El 5 puede ser el resultado de un dado o la suma de los dos dados. Al usar un único dado de 5, el otro dado sigue disponible; al sumar ambos para obtener 5, se consumen ambos. Si todas las fichas del jugador están fuera o ninguna salida es legal, se ofrecen las demás jugadas legales.
+
+Con triple_six_rule igual a return_last_piece_home, tres seises consecutivos del mismo jugador en la secuencia de turnos hacen que la última ficha movida por ese jugador vuelva a home. Con none no existe esa penalización. La partida continúa hasta que hayan terminado seat_count - 1 jugadores: en una mesa de cuatro se espera al tercer puesto; en una de cinco al cuarto; y así sucesivamente. El jugador restante recibe automáticamente el último puesto sin tener que terminar las cuatro fichas. winner_id conserva al ganador y result/finish_order conserva las posiciones para la clasificación.
 
 ## 6. Tablero lógico y layouts visuales
 
@@ -389,12 +393,13 @@ Fase 3 — capa social:
 - Reacciones rápidas con control individual de música, efectos y reacciones.
 - Regalos gratuitos: rosa, tomate, aplausos, confeti, corazón y fuego.
 - Animaciones ligeras y no bloqueantes.
+- Skins visuales de dados y fichas, gratuitas para todos, sin tienda, monedas, inventario limitado ni efecto sobre las reglas.
 
 Fase 4 — persistencia y personalización:
 
 - Redis para estado temporal y presencia distribuida.
 - PostgreSQL para partidas e historial.
-- Estadísticas, avatares y personalización.
+- Estadísticas, avatares y personalización adicional.
 
 ## 13. Migración futura
 

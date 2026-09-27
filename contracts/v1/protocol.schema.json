@@ -5,35 +5,90 @@
   "oneOf": [
     { "$ref": "#/$defs/reconnect" },
     { "$ref": "#/$defs/playerReady" },
-    { "$ref": "#/$defs/startGame" }
+    { "$ref": "#/$defs/startGame" },
+    { "$ref": "#/$defs/rollDice" },
+    { "$ref": "#/$defs/movePiece" },
+    { "$ref": "#/$defs/moveBonusPiece" },
+    { "$ref": "#/$defs/returnToLobby" },
+    { "$ref": "#/$defs/playAgain" }
   ],
   "$defs": {
     "roomCode": { "type": "string", "pattern": "^[A-Z2-9]{5}$" },
     "requestId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "pieceId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "base": {
+      "type": "object",
+      "required": ["type", "version", "requestId"],
+      "properties": {
+        "type": { "type": "string" },
+        "version": { "const": 1 },
+        "requestId": { "$ref": "#/$defs/requestId" }
+      }
+    },
     "reconnect": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["type", "version", "roomCode", "playerToken"],
       "properties": {
-        "type": { "const": "RECONNECT" }, "version": { "const": 1 },
+        "type": { "const": "RECONNECT" },
+        "version": { "const": 1 },
         "roomCode": { "$ref": "#/$defs/roomCode" },
         "playerToken": { "type": "string", "minLength": 32, "maxLength": 256 }
       }
     },
     "playerReady": {
-      "type": "object", "additionalProperties": false,
-      "required": ["type", "version", "ready", "requestId"],
+      "$ref": "#/$defs/base",
+      "unevaluatedProperties": false,
       "properties": {
-        "type": { "const": "PLAYER_READY" }, "version": { "const": 1 },
-        "ready": { "type": "boolean" }, "requestId": { "$ref": "#/$defs/requestId" }
-      }
+        "type": { "const": "PLAYER_READY" },
+        "ready": { "type": "boolean" }
+      },
+      "required": ["type", "version", "requestId", "ready"]
     },
     "startGame": {
-      "type": "object", "additionalProperties": false,
-      "required": ["type", "version", "requestId"],
+      "$ref": "#/$defs/base",
+      "unevaluatedProperties": false,
+      "properties": { "type": { "const": "START_GAME" } }
+    },
+    "rollDice": {
+      "$ref": "#/$defs/base",
+      "unevaluatedProperties": false,
+      "properties": { "type": { "const": "ROLL_DICE" } }
+    },
+    "movePiece": {
+      "$ref": "#/$defs/base",
+      "unevaluatedProperties": false,
       "properties": {
-        "type": { "const": "START_GAME" }, "version": { "const": 1 },
-        "requestId": { "$ref": "#/$defs/requestId" }
-      }
+        "type": { "const": "MOVE_PIECE" },
+        "pieceId": { "$ref": "#/$defs/pieceId" },
+        "diceIndices": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 1 },
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true
+        }
+      },
+      "required": ["type", "version", "requestId", "pieceId", "diceIndices"]
+    },
+    "moveBonusPiece": {
+      "$ref": "#/$defs/base",
+      "unevaluatedProperties": false,
+      "properties": {
+        "type": { "const": "MOVE_BONUS_PIECE" },
+        "pieceId": { "$ref": "#/$defs/pieceId" }
+      },
+      "required": ["type", "version", "requestId", "pieceId"]
+    },
+    "returnToLobby": {
+      "$ref": "#/$defs/base",
+      "unevaluatedProperties": false,
+      "properties": { "type": { "const": "RETURN_TO_LOBBY" } }
+    },
+    "playAgain": {
+      "$ref": "#/$defs/base",
+      "unevaluatedProperties": false,
+      "properties": { "type": { "const": "PLAY_AGAIN" } }
     }
   }
 }

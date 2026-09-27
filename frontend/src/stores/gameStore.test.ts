@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerEvent } from "@/types/protocol";
+import {
+  gameRoomFixture,
+  gameStateFixture,
+  gameSyncEvent,
+} from "@/test/game-fixtures";
 import { clearSession, readSession, saveSession, type RoomSession } from "@/lib/session";
 import { useGameStore } from "./gameStore";
 
@@ -12,43 +17,89 @@ const session = {
 
 const sessionKey = "parchis:session:v1:AB7K2";
 
-const syncEvent = (stateVersion: number): ServerEvent => ({
-  type: "GAME_STATE_SYNC",
-  version: 1,
-  roomCode: "AB7K2",
-  stateVersion,
-  eventId: "evt-" + stateVersion,
-  serverTime: "2026-09-14T18:30:00Z",
-  payload: {
-    room: {
-      roomCode: "AB7K2",
-      status: "lobby",
-      maxPlayers: 4,
-      hostPlayerId: "p1",
-      players: [],
-      stateVersion,
-    },
-  },
-});
-
 describe("game store", () => {
   beforeEach(() => {
     useGameStore.getState().reset();
   });
 
   it("hydrates the room from GAME_STATE_SYNC", () => {
-    useGameStore.getState().applyEvent(syncEvent(2));
+    useGameStore.getState().applyEvent(
+      gameSyncEvent({
+        stateVersion: 2,
+        room: gameRoomFixture({ stateVersion: 2 }),
+      }),
+    );
 
     expect(useGameStore.getState().room?.roomCode).toBe("AB7K2");
     expect(useGameStore.getState().lastStateVersion).toBe(2);
   });
 
   it("ignores an older state snapshot", () => {
-    useGameStore.getState().applyEvent(syncEvent(4));
-    useGameStore.getState().applyEvent(syncEvent(3));
+    useGameStore.getState().applyEvent(
+      gameSyncEvent({
+        stateVersion: 4,
+        room: gameRoomFixture({ stateVersion: 4 }),
+      }),
+    );
+    useGameStore.getState().applyEvent(
+      gameSyncEvent({
+        stateVersion: 3,
+        room: gameRoomFixture({ stateVersion: 3 }),
+      }),
+    );
 
     expect(useGameStore.getState().lastStateVersion).toBe(4);
     expect(useGameStore.getState().room?.stateVersion).toBe(4);
+  });
+
+  it("keeps piece positions unchanged on semantic events until the next snapshot", () => {
+    const game = gameStateFixture();
+    const room = gameRoomFixture({
+      status: "playing",
+      stateVersion: 12,
+      gameState: game,
+    });
+    useGameStore.getState().applyEvent(gameSyncEvent({ room, stateVersion: 12 }));
+
+    const event: Extract<ServerEvent, { type: "PIECE_MOVED" }> = {
+      type: "PIECE_MOVED",
+      version: 1,
+      roomCode: "AB7K2",
+      stateVersion: 13,
+      eventId: "evt-move",
+      serverTime: "2026-09-25T18:30:00Z",
+      payload: {
+        pieceId: "p1-piece-1",
+        from: { state: "yard", trackPosition: null, finishProgress: null },
+        to: { state: "track", trackPosition: 0, finishProgress: null },
+        diceIndices: [0],
+        path: [{ state: "track", trackPosition: 0, finishProgress: null }],
+      },
+    };
+    useGameStore.getState().applyEvent(event);
+
+    expect(useGameStore.getState().room?.gameState?.pieces).toEqual(game.pieces);
+    expect(useGameStore.getState().lastStateVersion).toBe(13);
+    expect(useGameStore.getState().recentEvents.at(-1)).toEqual(event);
+
+    const updatedGame = gameStateFixture({
+      pieces: game.pieces.map((piece) =>
+        piece.id === "p1-piece-1"
+          ? { ...piece, state: "track", trackPosition: 0 }
+          : piece,
+      ),
+    });
+    const updatedRoom = gameRoomFixture({
+      status: "playing",
+      stateVersion: 13,
+      gameState: updatedGame,
+    });
+    useGameStore.getState().applyEvent(
+      gameSyncEvent({ room: updatedRoom, stateVersion: 13 }),
+    );
+    expect(useGameStore.getState().room?.gameState?.pieces).toEqual(
+      updatedGame.pieces,
+    );
   });
 });
 

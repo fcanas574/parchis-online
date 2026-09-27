@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.rooms import get_room_manager, get_room_rate_limiter
+from app.config import settings
 from app.main import app
 from app.repositories.memory_room_repository import MemoryRoomRepository
 from app.security.rate_limit import FixedWindowRateLimiter
@@ -47,6 +48,77 @@ def test_create_room_returns_credentials(client):
     assert body["playerToken"]
     assert body["isHost"] is True
     assert body["wsPath"] == "/api/ws/rooms/AB7K2"
+
+
+@pytest.mark.parametrize("player_count", [4, 5, 6])
+def test_create_practice_returns_human_credentials_and_active_room(client, player_count):
+    response = client.post(
+        "/api/practice",
+        json={"displayName": "Felipe", "playerCount": player_count, "color": "purple"},
+    )
+
+    assert response.status_code == 201
+    credentials = response.json()
+    assert credentials["playerToken"]
+    assert credentials["isHost"] is True
+    room_response = client.get(f"/api/rooms/{credentials['roomCode']}")
+    assert room_response.status_code == 200
+    room = room_response.json()
+    assert room["mode"] == "practice"
+    assert room["status"] == "playing"
+    assert len(room["players"]) == player_count
+    assert sum(player["isBot"] for player in room["players"]) == player_count - 1
+    assert "playerToken" not in room_response.text
+
+
+@pytest.mark.parametrize(
+    "invalid_payload",
+    [
+        {"displayName": "X", "playerCount": 4, "color": "green"},
+        {"displayName": "Felipe", "playerCount": 3, "color": "green"},
+        {"displayName": "Felipe", "playerCount": 4, "color": "pink"},
+    ],
+)
+def test_invalid_practice_request_creates_no_room(client, invalid_payload):
+    response = client.post("/api/practice", json=invalid_payload)
+
+    assert response.status_code == 422
+    assert client.get("/api/rooms/AB7K2").status_code == 404
+
+
+def test_practice_can_be_disabled_without_creating_a_room(client, monkeypatch):
+    monkeypatch.setattr(settings, "practice_mode_enabled", False, raising=False)
+
+    response = client.post(
+        "/api/practice",
+        json={"displayName": "Felipe", "playerCount": 4, "color": "green"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PRACTICE_DISABLED"
+    assert client.get("/api/rooms/AB7K2").status_code == 404
+
+
+def test_practice_uses_the_same_creation_rate_limit(client):
+    for number in range(19):
+        response = client.post(
+            "/api/rooms",
+            json={"displayName": f"Host {number}", "playerCount": 4},
+        )
+        assert response.status_code == 201
+
+    practice = client.post(
+        "/api/practice",
+        json={"displayName": "Felipe", "playerCount": 4},
+    )
+    limited = client.post(
+        "/api/practice",
+        json={"displayName": "Ana", "playerCount": 4},
+    )
+
+    assert practice.status_code == 201
+    assert limited.status_code == 429
+    assert limited.json()["code"] == "RATE_LIMITED"
 
 
 def test_join_room_returns_credentials_without_exposing_existing_tokens(client):

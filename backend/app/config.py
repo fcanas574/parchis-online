@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     reservation_ttl_seconds: int = 600
     max_websocket_message_bytes: int = 16384
     room_requests_per_minute: int = 20
+    practice_mode_enabled: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

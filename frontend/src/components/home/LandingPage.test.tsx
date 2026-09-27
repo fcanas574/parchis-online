@@ -60,6 +60,58 @@ describe("LandingPage", () => {
     expect(pushMock).toHaveBeenCalledWith("/room/AB7K2");
   });
 
+  it("opens the discreet practice route only on the fifth quick emblem activation", () => {
+    render(<LandingPage />);
+
+    const emblem = screen.getByRole("button", { name: /práctica.*cinco toques/i });
+    expect(emblem.tagName).toBe("BUTTON");
+    for (let activation = 0; activation < 4; activation += 1) {
+      fireEvent.click(emblem);
+    }
+    expect(pushMock).not.toHaveBeenCalled();
+
+    fireEvent.click(emblem);
+    expect(pushMock).toHaveBeenCalledExactlyOnceWith("/practice");
+  });
+
+  it("resets the hidden practice sequence after two seconds", () => {
+    vi.useFakeTimers();
+    try {
+      render(<LandingPage />);
+      const emblem = screen.getByRole("button", { name: /práctica.*cinco toques/i });
+
+      for (let activation = 0; activation < 4; activation += 1) {
+        fireEvent.click(emblem);
+      }
+      act(() => vi.advanceTimersByTime(2_001));
+      fireEvent.click(emblem);
+      expect(pushMock).not.toHaveBeenCalled();
+
+      for (let activation = 0; activation < 4; activation += 1) {
+        fireEvent.click(emblem);
+      }
+      expect(pushMock).toHaveBeenCalledExactlyOnceWith("/practice");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("navigates once in Strict Mode and leaves the friend-room controls visible", () => {
+    render(
+      <StrictMode>
+        <LandingPage />
+      </StrictMode>,
+    );
+
+    expect(screen.getByRole("button", { name: "Crear partida" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Unirse a partida" })).toBeVisible();
+    const emblem = screen.getByRole("button", { name: /práctica.*cinco toques/i });
+    for (let activation = 0; activation < 6; activation += 1) {
+      fireEvent.click(emblem);
+    }
+    expect(pushMock).toHaveBeenCalledExactlyOnceWith("/practice");
+  });
+
   it("normalizes a join code to uppercase before joining", async () => {
     joinRoomMock.mockResolvedValue({ ...credentials, isHost: false });
     render(<LandingPage />);

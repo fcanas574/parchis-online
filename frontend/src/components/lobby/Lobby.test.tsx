@@ -9,6 +9,11 @@ const { sendReadyMock, sendStartGameMock } = vi.hoisted(() => ({
   sendStartGameMock: vi.fn(),
 }));
 
+const actions = {
+  sendReady: sendReadyMock,
+  sendStartGame: sendStartGameMock,
+};
+
 vi.mock("@/hooks/useGameSocket", () => ({
   useGameSocket: vi.fn(() => ({
     sendReady: sendReadyMock,
@@ -23,6 +28,7 @@ const players: PublicPlayer[] = [
     color: "green",
     seatIndex: 0,
     isHost: true,
+    isBot: false,
     isReady: true,
     isConnected: true,
     reservationExpiresAt: null,
@@ -33,6 +39,7 @@ const players: PublicPlayer[] = [
     color: "blue",
     seatIndex: 1,
     isHost: false,
+    isBot: false,
     isReady: true,
     isConnected: true,
     reservationExpiresAt: null,
@@ -43,6 +50,7 @@ const players: PublicPlayer[] = [
     color: "red",
     seatIndex: 2,
     isHost: false,
+    isBot: false,
     isReady: true,
     isConnected: true,
     reservationExpiresAt: null,
@@ -53,6 +61,7 @@ const players: PublicPlayer[] = [
     color: "yellow",
     seatIndex: 3,
     isHost: false,
+    isBot: false,
     isReady: true,
     isConnected: true,
     reservationExpiresAt: null,
@@ -61,11 +70,14 @@ const players: PublicPlayer[] = [
 
 const room = (overrides: Partial<PublicRoomState> = {}): PublicRoomState => ({
   roomCode: "AB7K2",
+  mode: "friends",
   status: "lobby",
   maxPlayers: 4,
   hostPlayerId: "p1",
   players,
   stateVersion: 7,
+  gameState: null,
+  lastGameResult: null,
   ...overrides,
 });
 
@@ -103,9 +115,11 @@ describe("Lobby", () => {
     vi.useRealTimers();
   });
 
+  const renderLobby = () => render(<Lobby roomCode="AB7K2" actions={actions} />);
+
   it("renders the lobby players, connection status, ready action, and invitation copy", async () => {
     setRoomState(room());
-    render(<Lobby roomCode="AB7K2" />);
+    renderLobby();
 
     expect(screen.getByText("Sala sincronizada")).toBeInTheDocument();
     expect(screen.getByText("Felipe")).toBeInTheDocument();
@@ -119,7 +133,7 @@ describe("Lobby", () => {
   it("keeps Copiado visible for two seconds", async () => {
     vi.useFakeTimers();
     setRoomState(room());
-    render(<Lobby roomCode="AB7K2" />);
+    renderLobby();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copiar invitación" }));
@@ -139,7 +153,7 @@ describe("Lobby", () => {
       value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
     });
     setRoomState(room());
-    render(<Lobby roomCode="AB7K2" />);
+    renderLobby();
 
     fireEvent.click(screen.getByRole("button", { name: "Copiar invitación" }));
 
@@ -153,7 +167,7 @@ describe("Lobby", () => {
 
   it("shows the host start action but disables it until the room is full and ready", () => {
     setRoomState(room({ players: players.slice(0, 3) }));
-    render(<Lobby roomCode="AB7K2" />);
+    renderLobby();
 
     expect(screen.getByRole("button", { name: "Iniciar partida" })).toBeDisabled();
     expect(screen.getByText(/Falta 1 jugador/)).toBeInTheDocument();
@@ -161,7 +175,7 @@ describe("Lobby", () => {
 
   it("enables the host start action when every seat is connected and ready", () => {
     setRoomState(room());
-    render(<Lobby roomCode="AB7K2" />);
+    renderLobby();
 
     const start = screen.getByRole("button", { name: "Iniciar partida" });
     expect(start).toBeEnabled();
@@ -171,25 +185,25 @@ describe("Lobby", () => {
 
   it("does not show the start action to a non-host", () => {
     setRoomState(room(), "p2");
-    render(<Lobby roomCode="AB7K2" />);
+    renderLobby();
 
     expect(screen.queryByRole("button", { name: "Iniciar partida" })).not.toBeInTheDocument();
   });
 
   it("sends the inverse of the current player's authoritative ready state", () => {
     setRoomState(room());
-    render(<Lobby roomCode="AB7K2" />);
+    renderLobby();
 
     fireEvent.click(screen.getByRole("button", { name: "Ya no estoy listo" }));
     expect(sendReadyMock).toHaveBeenCalledWith(false);
   });
 
-  it("replaces lobby controls with the Phase 2 notice after play starts", () => {
+  it("waits for the authoritative game snapshot after play starts", () => {
     setRoomState(room({ status: "playing" }));
-    render(<Lobby roomCode="AB7K2" />);
+    renderLobby();
 
     expect(
-      screen.getByText("Partida iniciada; el tablero se incorporará en la siguiente fase"),
+      screen.getByText("La sala ya comenzó. Estamos recuperando el estado actual del tablero…"),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Iniciar partida" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Copiar invitación" })).not.toBeInTheDocument();

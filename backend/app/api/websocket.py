@@ -1,6 +1,8 @@
+import asyncio
 import json
 from collections import deque
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -13,7 +15,8 @@ from app.realtime.connection_manager import (
     ConnectionManager,
     RoomPublicationCoordinator,
 )
-from app.realtime.events import make_error_event, make_event
+from app.realtime.autopilot_runner import RoomAutopilotRunner
+from app.realtime.events import make_change_events, make_error_event, make_event
 from app.services.command_router import CommandContext, CommandRouter
 from app.services.room_manager import RoomError, RoomManager
 
@@ -22,6 +25,17 @@ router = APIRouter(prefix="/api/ws", tags=["websocket"])
 
 _connection_manager = ConnectionManager()
 _publication_coordinator = RoomPublicationCoordinator()
+_autopilot_runners: WeakKeyDictionary[RoomManager, RoomAutopilotRunner] = (
+    WeakKeyDictionary()
+)
+
+
+def _runner_for(room_manager: RoomManager) -> RoomAutopilotRunner:
+    runner = _autopilot_runners.get(room_manager)
+    if runner is None:
+        runner = RoomAutopilotRunner()
+        _autopilot_runners[room_manager] = runner
+    return runner
 
 
 def get_connection_manager() -> ConnectionManager:
@@ -134,38 +148,25 @@ async def room_websocket(
         target: ClientConnection,
         state: RoomState,
     ) -> None:
+        public_room = room_manager.public_room_from_state(state)
         await send_connection_event(
             target,
             make_event(
                 "GAME_STATE_SYNC",
                 state.room_code,
                 state.state_version,
-                {"room": room_manager.public_room_from_state(state)},
+                {"room": public_room, "game": public_room["gameState"]},
             ),
         )
 
     async def broadcast_change(change: RoomChange) -> list[ClientConnection]:
         # Finish the complete versioned batch before publishing any disconnects.
-        semantic_event = make_event(
-            change.event_type,
-            change.state.room_code,
-            change.state.state_version,
-            change.payload,
-            change.request_id,
-        )
-        failed = await connection_manager.broadcast(
-            change.state.room_code, semantic_event
-        )
+        failed: list[ClientConnection] = []
         public_room = room_manager.public_room_from_state(change.state)
-        sync_event = make_event(
-            "GAME_STATE_SYNC",
-            change.state.room_code,
-            change.state.state_version,
-            {"room": public_room},
-        )
-        failed.extend(
-            await connection_manager.broadcast(change.state.room_code, sync_event)
-        )
+        for event in make_change_events(change, public_room):
+            failed.extend(
+                await connection_manager.broadcast(change.state.room_code, event)
+            )
         return failed
 
     async def disconnect_connections(targets: list[ClientConnection]) -> None:
@@ -176,6 +177,7 @@ async def room_websocket(
         the room publication lock while emitting PLAYER_LEFT and its snapshot.
         """
         pending = deque(targets)
+        should_start_autopilot = False
         while pending:
             target = pending.popleft()
             removed = await connection_manager.remove(
@@ -190,6 +192,11 @@ async def room_websocket(
             except RoomError:
                 change = None
             if change is not None:
+                if (
+                    change.state.status == "playing"
+                    and change.state.game_state is not None
+                ):
+                    should_start_autopilot = True
                 pending.extend(await broadcast_change(change))
             if (
                 target.websocket.client_state is WebSocketState.CONNECTED
@@ -200,6 +207,38 @@ async def room_websocket(
                 except Exception:
                     # A failed transport must not block cleanup.
                     pass
+        if should_start_autopilot:
+            schedule_autopilot()
+
+    async def run_autopilot_worker() -> None:
+        while True:
+            try:
+                state = await room_manager.get_room(room_code)
+            except RoomError:
+                return
+            game = state.game_state
+            if state.status != "playing" or game is None:
+                return
+            active = next(
+                (player for player in state.players if player.id == game.current_player_id),
+                None,
+            )
+            if active is None or (active.is_connected and not active.is_bot):
+                return
+            # Keep the publication lock free while the bot's dice/move is shown.
+            await asyncio.sleep(0.5 if active.is_bot else 0)
+            async with publication_coordinator.serialize(room_code):
+                change = await room_manager.run_autopilot_step(room_code)
+                if change is None:
+                    return
+                failures = await broadcast_change(change)
+                await disconnect_connections(failures)
+            # Let a reconnecting player acquire the publication lock before the
+            # next step re-checks which seat owns the turn.
+            await asyncio.sleep(0)
+
+    def schedule_autopilot() -> None:
+        _runner_for(room_manager).schedule(room_code, run_autopilot_worker)
 
     try:
         try:
@@ -252,6 +291,18 @@ async def room_websocket(
             await send_handshake_error(error)
             return
 
+        if state.status == "playing" and state.game_state is not None:
+            active = next(
+                (
+                    player
+                    for player in state.players
+                    if player.id == state.game_state.current_player_id
+                ),
+                None,
+            )
+            if active is not None and (active.is_bot or not active.is_connected):
+                schedule_autopilot()
+
         command_router = CommandRouter(room_manager)
         context = CommandContext(authenticated.identity, room_code)
         while await connection_manager.is_current(connection):
@@ -282,6 +333,11 @@ async def room_websocket(
                         else:
                             failures = await broadcast_change(change)
                             await disconnect_connections(failures)
+                            if (
+                                change.state.status == "playing"
+                                and change.event_type != "GAME_STARTED"
+                            ):
+                                schedule_autopilot()
             if stop_stale_connection:
                 break
     except WebSocketDisconnect:

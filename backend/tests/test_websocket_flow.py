@@ -1,21 +1,44 @@
 import asyncio
 import json
 import threading
+import time
 from contextlib import ExitStack
 from itertools import chain, count, product
 
 import anyio
 import pytest
+from pydantic import TypeAdapter
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.api.rooms import get_room_manager, get_room_rate_limiter
 from app.api.websocket import get_connection_manager
+from app.game.rules import GameRules
 from app.main import app
 from app.realtime.connection_manager import ClientConnection, ConnectionManager
+from app.realtime.events import make_event
 from app.repositories.memory_room_repository import MemoryRoomRepository
 from app.security.rate_limit import FixedWindowRateLimiter
+from app.schemas.websocket import ServerEvent
 from app.services.room_manager import RoomManager
+from game_support import SequenceDice
+
+
+@pytest.mark.asyncio
+async def test_practice_snapshot_validates_strict_wire_schema(room_manager):
+    credentials = await room_manager.create_practice_room("Felipe", 5, "purple")
+    public_room = await room_manager.public_room(credentials.room_code)
+    event = make_event(
+        "GAME_STATE_SYNC",
+        credentials.room_code,
+        public_room["stateVersion"],
+        {"room": public_room, "game": public_room["gameState"]},
+    )
+
+    parsed = TypeAdapter(ServerEvent).validate_python(event)
+
+    assert parsed.payload.room.mode == "practice"
+    assert [player.is_bot for player in parsed.payload.room.players] == [False, True, True, True, True]
 
 
 _PRIVATE_CREDENTIAL_KEYS = {"playerToken", "tokenHash", "token_hash"}
@@ -59,6 +82,22 @@ def receive_until_request(websocket, event_type: str, request_id: str) -> dict:
     pytest.fail(
         f"Did not receive {event_type} for {request_id} within 20 messages"
     )
+
+
+def receive_until_with_timeout(websocket, event_type: str, seconds: float = 2.0) -> dict:
+    async def receive_event() -> dict:
+        with anyio.fail_after(seconds):
+            for _ in range(30):
+                message = await websocket._send_rx.receive()
+                if message["type"] != "websocket.send":
+                    continue
+                event = json.loads(message["text"])
+                assert_no_private_credentials(event)
+                if event["type"] == event_type:
+                    return event
+        raise AssertionError(f"Did not receive {event_type} within 30 messages")
+
+    return websocket.portal.call(receive_event)
 
 
 def receive_complete_snapshot(
@@ -150,6 +189,7 @@ def client(clock):
         code_generator=lambda: next(generated_codes),
         token_generator=lambda: next(generated_tokens),
         clock=clock,
+        game_rules=GameRules(dice=SequenceDice([(5, 2)] * 40)),
     )
     limiter = FixedWindowRateLimiter(limit=20, window_seconds=60, clock=clock)
     app.dependency_overrides[get_room_manager] = lambda: manager
@@ -191,6 +231,7 @@ def test_handshake_sends_authoritative_snapshot_with_host(client):
 
     room = sync["payload"]["room"]
     assert room["hostPlayerId"] == host["playerId"]
+    assert room["mode"] == "friends"
     assert room["players"] == [
         {
             "id": host["playerId"],
@@ -198,6 +239,7 @@ def test_handshake_sends_authoritative_snapshot_with_host(client):
             "color": "green",
             "seatIndex": 0,
             "isHost": True,
+            "isBot": False,
             "isReady": False,
             "isConnected": True,
             "reservationExpiresAt": None,
@@ -426,6 +468,220 @@ def test_four_player_room_full_flow_is_authoritative_for_every_socket(client):
             assert all(
                 player["isReady"] for player in sync["payload"]["room"]["players"]
             )
+
+
+def test_gameplay_events_and_full_snapshots_match_for_every_socket(client):
+    host = create_room(client)
+    guests = [join_room(client, host["roomCode"], number) for number in range(1, 4)]
+    credentials = [host, *guests]
+
+    with ExitStack() as stack:
+        sockets = [
+            stack.enter_context(client.websocket_connect(player["wsPath"]))
+            for player in credentials
+        ]
+        for websocket, player in zip(sockets, credentials, strict=True):
+            websocket.send_json(
+                reconnect_message(player["roomCode"], player["playerToken"])
+            )
+
+        initial_version = client.get(f"/api/rooms/{host['roomCode']}").json()[
+            "stateVersion"
+        ]
+        initial_snapshots = [
+            receive_complete_snapshot(websocket, 4, initial_version)
+            for websocket in sockets
+        ]
+        assert_room_snapshots_equal(initial_snapshots)
+
+        for index, websocket in enumerate(sockets):
+            request_id = f"game-ready-{index}"
+            websocket.send_json(
+                {
+                    "type": "PLAYER_READY",
+                    "version": 1,
+                    "ready": True,
+                    "requestId": request_id,
+                }
+            )
+            for recipient in sockets:
+                receive_until_request(recipient, "PLAYER_READY", request_id)
+            for recipient in sockets:
+                receive_until(recipient, "GAME_STATE_SYNC")
+
+        sockets[0].send_json(
+            {"type": "START_GAME", "version": 1, "requestId": "game-start"}
+        )
+        for websocket in sockets:
+            receive_until_request(websocket, "GAME_STARTED", "game-start")
+        start_snapshots = [
+            receive_until(websocket, "GAME_STATE_SYNC") for websocket in sockets
+        ]
+        assert_room_snapshots_equal(start_snapshots)
+        assert all(
+            snapshot["payload"]["game"]
+            == snapshot["payload"]["room"]["gameState"]
+            for snapshot in start_snapshots
+        )
+
+        sockets[0].send_json(
+            {"type": "ROLL_DICE", "version": 1, "requestId": "game-roll"}
+        )
+        roll_events = [
+            receive_until_request(websocket, "DICE_ROLLED", "game-roll")
+            for websocket in sockets
+        ]
+        roll_snapshots = [
+            receive_until(websocket, "GAME_STATE_SYNC") for websocket in sockets
+        ]
+        assert {event["stateVersion"] for event in roll_events + roll_snapshots} == {
+            roll_events[0]["stateVersion"]
+        }
+        assert all(event["payload"] == roll_events[0]["payload"] for event in roll_events)
+        assert all(
+            snapshot["payload"]["game"]
+            == snapshot["payload"]["room"]["gameState"]
+            for snapshot in roll_snapshots
+        )
+        assert_room_snapshots_equal(roll_snapshots)
+        event_adapter = TypeAdapter(ServerEvent)
+        event_adapter.validate_python(roll_events[0])
+        event_adapter.validate_python(roll_snapshots[0])
+        move = next(
+            option
+            for option in roll_events[0]["payload"]["availableMoves"]
+            if option["leavesHome"]
+        )
+
+        sockets[0].send_json(
+            {
+                "type": "MOVE_PIECE",
+                "version": 1,
+                "requestId": "game-move",
+                "pieceId": move["pieceId"],
+                "diceIndices": move["diceIndices"],
+            }
+        )
+        move_events = [
+            receive_until_request(websocket, "PIECE_MOVED", "game-move")
+            for websocket in sockets
+        ]
+        move_snapshots = [
+            receive_until(websocket, "GAME_STATE_SYNC") for websocket in sockets
+        ]
+        assert {event["stateVersion"] for event in move_events + move_snapshots} == {
+            move_events[0]["stateVersion"]
+        }
+        assert all(event["payload"] == move_events[0]["payload"] for event in move_events)
+        move_payload = move_events[0]["payload"]
+        assert move_payload["from"]["state"] == "yard"
+        assert move_payload["path"] == [move_payload["to"]]
+        assert move_events[0]["stateVersion"] == move_snapshots[0]["stateVersion"]
+        assert_room_snapshots_equal(move_snapshots)
+        event_adapter.validate_python(move_events[0])
+        event_adapter.validate_python(move_snapshots[0])
+
+
+def test_disconnected_current_player_takes_automatic_turn(client):
+    host = create_room(client)
+    guests = [join_room(client, host["roomCode"], number) for number in range(1, 4)]
+    credentials = [host, *guests]
+
+    with ExitStack() as stack:
+        sockets = [
+            stack.enter_context(client.websocket_connect(player["wsPath"]))
+            for player in credentials
+        ]
+        for websocket, player in zip(sockets, credentials, strict=True):
+            websocket.send_json(
+                reconnect_message(player["roomCode"], player["playerToken"])
+            )
+        version = client.get(f"/api/rooms/{host['roomCode']}").json()["stateVersion"]
+        for websocket in sockets:
+            receive_complete_snapshot(websocket, 4, version)
+
+        for index, websocket in enumerate(sockets):
+            request_id = f"autopilot-ready-{index}"
+            websocket.send_json(
+                {
+                    "type": "PLAYER_READY",
+                    "version": 1,
+                    "ready": True,
+                    "requestId": request_id,
+                }
+            )
+            for recipient in sockets:
+                receive_until_request(recipient, "PLAYER_READY", request_id)
+            for recipient in sockets:
+                receive_until(recipient, "GAME_STATE_SYNC")
+
+        sockets[0].send_json(
+            {"type": "START_GAME", "version": 1, "requestId": "autopilot-start"}
+        )
+        for websocket in sockets:
+            receive_until_request(websocket, "GAME_STARTED", "autopilot-start")
+        for websocket in sockets:
+            receive_until(websocket, "GAME_STATE_SYNC")
+
+        sockets[0].close()
+        observer = sockets[1]
+        left = receive_until(observer, "PLAYER_LEFT")
+        disconnected_sync = receive_until(observer, "GAME_STATE_SYNC")
+        automatic_roll = receive_until(observer, "DICE_ROLLED")
+        roll_sync = receive_until(observer, "GAME_STATE_SYNC")
+        automatic_move = receive_until(observer, "PIECE_MOVED")
+        move_sync = receive_until(observer, "GAME_STATE_SYNC")
+
+    assert left["payload"]["playerId"] == host["playerId"]
+    assert automatic_roll["payload"]["playerId"] == host["playerId"]
+    assert automatic_move["payload"]["pieceId"] == f"{host['playerId']}-piece-1"
+    assert automatic_roll["stateVersion"] == roll_sync["stateVersion"]
+    assert automatic_move["stateVersion"] == move_sync["stateVersion"]
+    assert disconnected_sync["payload"]["room"]["status"] == "playing"
+    assert roll_sync["payload"]["game"] == roll_sync["payload"]["room"]["gameState"]
+    assert move_sync["payload"]["game"] == move_sync["payload"]["room"]["gameState"]
+
+
+def test_reconnecting_host_resumes_one_bot_turn_with_ordered_events(client):
+    response = client.post(
+        "/api/practice",
+        json={"displayName": "Felipe", "playerCount": 4, "color": "green"},
+    )
+    assert response.status_code == 201
+    host = response.json()
+    manager = app.dependency_overrides[get_room_manager]()
+    room = client.portal.call(manager.get_room, host["roomCode"])
+    assert room.game_state is not None
+    bot_id = room.players[1].id
+    room.game_state.current_player_id = bot_id
+    room.players[0].has_connected = True
+    room.players[0].is_connected = False
+    client.portal.call(manager._repository.save, room)
+
+    with client.websocket_connect(host["wsPath"]) as websocket:
+        websocket.send_json(reconnect_message(host["roomCode"], host["playerToken"]))
+        reconnected = receive_until(websocket, "PLAYER_RECONNECTED")
+        synced = receive_until(websocket, "GAME_STATE_SYNC")
+        time.sleep(0.1)  # The worker should be waiting outside the publication lock.
+        websocket.send_json({"type": "ROLL_DICE", "version": 1, "requestId": "human-wrong-turn"})
+        wrong_turn = receive_until_with_timeout(websocket, "ERROR", seconds=0.3)
+        before_bot_roll = time.monotonic()
+        rolled = receive_until_with_timeout(websocket, "DICE_ROLLED")
+        bot_roll_delay = time.monotonic() - before_bot_roll
+        roll_sync = receive_until_with_timeout(websocket, "GAME_STATE_SYNC")
+        moved = receive_until_with_timeout(websocket, "PIECE_MOVED")
+        move_sync = receive_until_with_timeout(websocket, "GAME_STATE_SYNC")
+
+    assert reconnected["payload"]["player"]["id"] == host["playerId"]
+    assert synced["payload"]["room"]["mode"] == "practice"
+    assert wrong_turn["requestId"] == "human-wrong-turn"
+    assert wrong_turn["payload"]["code"] == "INVALID_GAME_ACTION"
+    assert bot_roll_delay >= 0.25
+    assert rolled["payload"]["playerId"] == bot_id
+    assert rolled["stateVersion"] == roll_sync["stateVersion"]
+    assert moved["stateVersion"] == move_sync["stateVersion"]
+    assert rolled["stateVersion"] < moved["stateVersion"]
+    assert moved["payload"]["pieceId"].startswith(f"{bot_id}-")
 
 
 @pytest.mark.parametrize("player_count", [5, 6])
@@ -746,7 +1002,7 @@ def test_concurrent_mutations_publish_versions_in_commit_order(client):
     assert versions[2] == versions[3] == versions[0] + 1
 
 
-def test_unsupported_command_returns_error_without_mutating_state(client):
+def test_not_yet_supported_command_returns_error_without_mutating_state(client):
     host = create_room(client)
 
     with client.websocket_connect(host["wsPath"]) as websocket:
@@ -755,7 +1011,7 @@ def test_unsupported_command_returns_error_without_mutating_state(client):
         state_version = sync["stateVersion"]
 
         websocket.send_json(
-            {"type": "ROLL_DICE", "version": 1, "requestId": "future-command"}
+            {"type": "CHAT_MESSAGE", "version": 1, "requestId": "future-command"}
         )
         error = receive_until(websocket, "ERROR")
 

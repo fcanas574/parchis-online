@@ -22,6 +22,8 @@ cp .env.example frontend/.env
 
 Los archivos `.env` locales son ignorados por Git. `.env` en la raíz configura CORS y los límites del backend; `frontend/.env` configura el origen público de la API.
 
+El modo de práctica está habilitado por defecto para pruebas locales. Si despliegas la app públicamente y no quieres aceptar partidas automáticas, añade `PRACTICE_MODE_ENABLED=false` al `.env` del backend; `POST /api/practice` responderá `PRACTICE_DISABLED` sin crear salas. Ocultar la entrada de práctica en la web no constituye autenticación.
+
 ## Desarrollo
 
 Inicia cada proceso en una terminal distinta, desde la raíz del repositorio:
@@ -54,9 +56,9 @@ Las salas viven en memoria: reiniciar el backend las elimina. PostgreSQL y Redis
 ## Fases
 
 - **Fase 1 — Salas y lobby:** lista para uso local entre amigos; incluye sincronización autoritativa de lobby y recuperación básica de sesión.
-- **Fase 2 — Partida:** añade `GameRules`, tablero, dados, fichas, turnos, capturas y victoria, conservando al servidor como autoridad.
+- **Fase 2 — Partida:** La Fase 2 incluye tableros para 4, 5 y 6 personas, partida autoritativa en tiempo real, reconexión con autopiloto y repetición en la misma sala. El estado permanece en memoria y chat, reacciones y regalos se aplazan a Fase 3.
 - **Fase 3 — Funciones sociales:** añade chat, emojis, reacciones, sonidos y regalos virtuales gratuitos.
 
 No hay pagos, monedas, tienda, anuncios, suscripciones, ranking global ni matchmaking público.
 
-El contrato versionado de mensajes está en [`contracts/v1/README.md`](contracts/v1/README.md); el alcance de diseño aprobado, en [`docs/superpowers/specs/2026-09-14-parchis-online-design.md`](docs/superpowers/specs/2026-09-14-parchis-online-design.md).
+El contrato versionado de mensajes está en [`contracts/v1/README.md`](contracts/v1/README.md); las especificaciones de producto y juego están en [`docs/superpowers/specs/2026-09-14-parchis-online-design.md`](docs/superpowers/specs/2026-09-14-parchis-online-design.md) y [`docs/superpowers/specs/2026-09-25-parchis-online-phase-2-gameplay-design.md`](docs/superpowers/specs/2026-09-25-parchis-online-phase-2-gameplay-design.md).

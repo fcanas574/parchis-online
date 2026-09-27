@@ -3,55 +3,417 @@
   "$id": "https://parchis-online.example/contracts/v1/server-events.schema.json",
   "title": "Parchís Online v1 server events",
   "oneOf": [
-    { "$ref": "#/$defs/playerJoined" }, { "$ref": "#/$defs/playerLeft" },
-    { "$ref": "#/$defs/playerReconnected" }, { "$ref": "#/$defs/playerReady" },
-    { "$ref": "#/$defs/gameStarted" }, { "$ref": "#/$defs/gameStateSync" },
+    { "$ref": "#/$defs/playerJoined" },
+    { "$ref": "#/$defs/playerLeft" },
+    { "$ref": "#/$defs/playerReconnected" },
+    { "$ref": "#/$defs/playerReady" },
+    { "$ref": "#/$defs/gameStarted" },
+    { "$ref": "#/$defs/turnStarted" },
+    { "$ref": "#/$defs/diceRolled" },
+    { "$ref": "#/$defs/pieceMoved" },
+    { "$ref": "#/$defs/pieceCaptured" },
+    { "$ref": "#/$defs/bonusGranted" },
+    { "$ref": "#/$defs/bonusSkipped" },
+    { "$ref": "#/$defs/turnEnded" },
+    { "$ref": "#/$defs/playerFinished" },
+    { "$ref": "#/$defs/gameFinished" },
+    { "$ref": "#/$defs/gameStateSync" },
+    { "$ref": "#/$defs/gameReset" },
     { "$ref": "#/$defs/error" }
   ],
   "$defs": {
     "roomCode": { "type": "string", "pattern": "^[A-Z2-9]{5}$" },
-    "base": {
-      "type": "object", "required": ["type", "version", "roomCode", "eventId", "serverTime", "stateVersion", "payload"],
+    "diceIndex": { "type": "integer", "minimum": 0, "maximum": 1 },
+    "dieValue": { "type": "integer", "minimum": 1, "maximum": 6 },
+    "placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["playerId", "rank"],
       "properties": {
-        "version": { "const": 1 }, "roomCode": { "$ref": "#/$defs/roomCode" },
-        "eventId": { "type": "string", "minLength": 1 },
-        "serverTime": { "type": "string", "format": "date-time" },
-        "stateVersion": { "type": "integer", "minimum": 0 }, "requestId": { "type": "string", "minLength": 1, "maxLength": 64 }
+        "playerId": { "type": "string" },
+        "rank": { "type": "integer", "minimum": 1, "maximum": 6 }
+      }
+    },
+    "gameResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["winnerId", "placements"],
+      "properties": {
+        "winnerId": { "type": "string" },
+        "placements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/placement" },
+          "minItems": 4,
+          "maxItems": 6
+        }
+      }
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "trackPosition", "finishProgress"],
+      "properties": {
+        "state": { "enum": ["yard", "track", "finish_path", "finished"] },
+        "trackPosition": { "type": ["integer", "null"], "minimum": 0 },
+        "finishProgress": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "piece": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "playerId", "state", "trackPosition", "finishProgress"],
+      "properties": {
+        "id": { "type": "string" },
+        "playerId": { "type": "string" },
+        "state": { "enum": ["yard", "track", "finish_path", "finished"] },
+        "trackPosition": { "type": ["integer", "null"], "minimum": 0 },
+        "finishProgress": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "moveOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pieceId", "diceIndices", "steps", "destination", "capturePieceId",
+        "completesPiece", "captures", "landsSafe", "leavesHome", "progress",
+        "completesSplitPlan"
+      ],
+      "properties": {
+        "pieceId": { "type": "string" },
+        "diceIndices": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/diceIndex" },
+          "maxItems": 2
+        },
+        "steps": { "type": "integer", "minimum": 1 },
+        "destination": { "$ref": "#/$defs/position" },
+        "capturePieceId": { "type": ["string", "null"] },
+        "completesPiece": { "type": "boolean" },
+        "captures": { "type": "boolean" },
+        "landsSafe": { "type": "boolean" },
+        "leavesHome": { "type": "boolean" },
+        "progress": { "type": "integer", "minimum": 0 },
+        "completesSplitPlan": { "type": "boolean" }
+      }
+    },
+    "pendingBonus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["playerId", "steps", "reason"],
+      "properties": {
+        "playerId": { "type": "string" },
+        "steps": { "type": "integer", "minimum": 1 },
+        "reason": { "enum": ["capture", "goal"] }
+      }
+    },
+    "gameState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "roomCode", "seatCount", "status", "playerOrder", "currentPlayerId",
+        "turnPhase", "diceValues", "usedDiceIndices", "availableMoves",
+        "pendingBonuses", "pieces", "finishOrder", "winnerId", "result",
+        "requiresSplitPlan"
+      ],
+      "properties": {
+        "roomCode": { "$ref": "#/$defs/roomCode" },
+        "seatCount": { "enum": [4, 5, 6] },
+        "status": { "enum": ["playing", "finished"] },
+        "playerOrder": {
+          "type": "array", "items": { "type": "string" },
+          "minItems": 4, "maxItems": 6
+        },
+        "currentPlayerId": { "type": ["string", "null"] },
+        "turnPhase": {
+          "enum": ["waiting_for_roll", "waiting_for_move", "waiting_for_bonus", "finished"]
+        },
+        "diceValues": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array", "items": { "$ref": "#/$defs/dieValue" },
+              "minItems": 2, "maxItems": 2
+            }
+          ]
+        },
+        "usedDiceIndices": {
+          "type": "array", "items": { "$ref": "#/$defs/diceIndex" },
+          "maxItems": 2, "uniqueItems": true
+        },
+        "availableMoves": { "type": "array", "items": { "$ref": "#/$defs/moveOption" } },
+        "pendingBonuses": { "type": "array", "items": { "$ref": "#/$defs/pendingBonus" } },
+        "pieces": { "type": "array", "items": { "$ref": "#/$defs/piece" } },
+        "finishOrder": { "type": "array", "items": { "type": "string" }, "maxItems": 6 },
+        "winnerId": { "type": ["string", "null"] },
+        "result": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/gameResult" }] },
+        "requiresSplitPlan": { "type": "boolean" }
       }
     },
     "player": {
-      "type": "object", "additionalProperties": false,
-      "required": ["id", "displayName", "color", "seatIndex", "isHost", "isReady", "isConnected", "reservationExpiresAt"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "displayName", "color", "seatIndex", "isHost", "isBot", "isReady",
+        "isConnected", "reservationExpiresAt"
+      ],
       "properties": {
-        "id": { "type": "string" }, "displayName": { "type": "string" },
+        "id": { "type": "string" },
+        "displayName": { "type": "string" },
         "color": { "enum": ["green", "red", "blue", "yellow", "purple", "orange"] },
-        "seatIndex": { "type": "integer", "minimum": 0 }, "isHost": { "type": "boolean" },
-        "isReady": { "type": "boolean" }, "isConnected": { "type": "boolean" },
+        "seatIndex": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "isHost": { "type": "boolean" },
+        "isBot": { "type": "boolean" },
+        "isReady": { "type": "boolean" },
+        "isConnected": { "type": "boolean" },
         "reservationExpiresAt": { "type": ["string", "null"], "format": "date-time" }
       }
     },
-    "playerJoined": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_JOINED" }, "payload": { "type": "object", "additionalProperties": false, "required": ["player"], "properties": { "player": { "$ref": "#/$defs/player" } } } } },
-    "playerLeft": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_LEFT" }, "payload": { "type": "object", "additionalProperties": false, "required": ["playerId", "reservationExpiresAt"], "properties": { "playerId": { "type": "string" }, "reservationExpiresAt": { "type": "string", "format": "date-time" } } } } },
-    "playerReconnected": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_RECONNECTED" }, "payload": { "type": "object", "additionalProperties": false, "required": ["player"], "properties": { "player": { "$ref": "#/$defs/player" } } } } },
-    "playerReady": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "PLAYER_READY" }, "payload": { "type": "object", "additionalProperties": false, "required": ["playerId", "ready"], "properties": { "playerId": { "type": "string" }, "ready": { "type": "boolean" } } } } },
-    "gameStarted": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "GAME_STARTED" }, "payload": { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "playing" } } } } },
-    "gameStateSync": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "GAME_STATE_SYNC" }, "payload": { "type": "object", "additionalProperties": false, "required": ["room"], "properties": { "room": { "oneOf": [ { "type": "object", "maxProperties": 0 }, { "$ref": "#/$defs/publicRoom" } ] } } } } },
-    "error": { "$ref": "#/$defs/envelope", "properties": { "type": { "const": "ERROR" }, "requestId": { "type": "string", "minLength": 1, "maxLength": 64 }, "payload": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } } } },
     "publicRoom": {
-      "type": "object", "additionalProperties": false,
-      "required": ["roomCode", "status", "maxPlayers", "hostPlayerId", "players", "stateVersion"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "roomCode", "mode", "status", "maxPlayers", "hostPlayerId", "players",
+        "stateVersion", "gameState", "lastGameResult"
+      ],
       "properties": {
         "roomCode": { "$ref": "#/$defs/roomCode" },
+        "mode": { "enum": ["friends", "practice"] },
         "status": { "enum": ["lobby", "playing", "finished"] },
-        "maxPlayers": { "enum": [4, 5, 6] }, "hostPlayerId": { "type": "string" },
-        "players": { "type": "array", "items": { "$ref": "#/$defs/player" } },
-        "stateVersion": { "type": "integer", "minimum": 0 }
+        "maxPlayers": { "enum": [4, 5, 6] },
+        "hostPlayerId": { "type": "string" },
+        "players": { "type": "array", "items": { "$ref": "#/$defs/player" }, "maxItems": 6 },
+        "stateVersion": { "type": "integer", "minimum": 0 },
+        "gameState": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/gameState" }] },
+        "lastGameResult": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/gameResult" }] }
       }
     },
     "envelope": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["type", "version", "roomCode", "eventId", "serverTime", "stateVersion", "payload"],
-      "properties": { "type": { "type": "string" }, "version": { "const": 1 }, "roomCode": { "$ref": "#/$defs/roomCode" }, "eventId": { "type": "string", "minLength": 1 }, "serverTime": { "type": "string", "format": "date-time" }, "stateVersion": { "type": "integer", "minimum": 0 }, "requestId": { "type": "string", "minLength": 1, "maxLength": 64 }, "payload": { "type": "object" } }
+      "properties": {
+        "type": { "type": "string" },
+        "version": { "const": 1 },
+        "roomCode": { "$ref": "#/$defs/roomCode" },
+        "eventId": { "type": "string", "minLength": 1 },
+        "serverTime": { "type": "string", "format": "date-time" },
+        "stateVersion": { "type": "integer", "minimum": 0 },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "payload": { "type": "object" }
+      }
+    },
+    "playerJoined": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "PLAYER_JOINED" },
+        "payload": {
+          "type": "object", "additionalProperties": false, "required": ["player"],
+          "properties": { "player": { "$ref": "#/$defs/player" } }
+        }
+      }
+    },
+    "playerLeft": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "PLAYER_LEFT" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "reservationExpiresAt"],
+          "properties": {
+            "playerId": { "type": "string" },
+            "reservationExpiresAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      }
+    },
+    "playerReconnected": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "PLAYER_RECONNECTED" },
+        "payload": {
+          "type": "object", "additionalProperties": false, "required": ["player"],
+          "properties": { "player": { "$ref": "#/$defs/player" } }
+        }
+      }
+    },
+    "playerReady": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "PLAYER_READY" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "ready"],
+          "properties": { "playerId": { "type": "string" }, "ready": { "type": "boolean" } }
+        }
+      }
+    },
+    "gameStarted": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "GAME_STARTED" },
+        "payload": {
+          "type": "object", "additionalProperties": false, "required": ["status"],
+          "properties": { "status": { "const": "playing" } }
+        }
+      }
+    },
+    "turnStarted": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "TURN_STARTED" },
+        "payload": {
+          "type": "object", "additionalProperties": false, "required": ["playerId"],
+          "properties": { "playerId": { "type": "string" } }
+        }
+      }
+    },
+    "diceRolled": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "DICE_ROLLED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "values", "availableMoves"],
+          "properties": {
+            "playerId": { "type": "string" },
+            "values": { "type": "array", "items": { "$ref": "#/$defs/dieValue" }, "minItems": 2, "maxItems": 2 },
+            "availableMoves": { "type": "array", "items": { "$ref": "#/$defs/moveOption" } }
+          }
+        }
+      }
+    },
+    "pieceMoved": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "PIECE_MOVED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["pieceId", "from", "to", "diceIndices", "path"],
+          "properties": {
+            "pieceId": { "type": "string" },
+            "from": { "$ref": "#/$defs/position" },
+            "to": { "$ref": "#/$defs/position" },
+            "diceIndices": { "type": "array", "items": { "$ref": "#/$defs/diceIndex" }, "maxItems": 2 },
+            "path": { "type": "array", "items": { "$ref": "#/$defs/position" }, "minItems": 1 }
+          }
+        }
+      }
+    },
+    "pieceCaptured": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "PIECE_CAPTURED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["capturedPieceId", "byPieceId", "bonusSteps"],
+          "properties": {
+            "capturedPieceId": { "type": "string" },
+            "byPieceId": { "type": "string" },
+            "bonusSteps": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "bonusGranted": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "BONUS_GRANTED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "steps", "reason"],
+          "properties": { "playerId": { "type": "string" }, "steps": { "type": "integer", "minimum": 1 }, "reason": { "enum": ["capture", "goal"] } }
+        }
+      }
+    },
+    "bonusSkipped": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "BONUS_SKIPPED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "steps", "reason", "skipReason"],
+          "properties": {
+            "playerId": { "type": "string" }, "steps": { "type": "integer", "minimum": 1 },
+            "reason": { "enum": ["capture", "goal"] },
+            "skipReason": { "enum": ["no_legal_moves", "player_not_active"] }
+          }
+        }
+      }
+    },
+    "turnEnded": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "TURN_ENDED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "extraTurn"],
+          "properties": { "playerId": { "type": "string" }, "extraTurn": { "type": "boolean" } }
+        }
+      }
+    },
+    "playerFinished": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "PLAYER_FINISHED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "rank"],
+          "properties": { "playerId": { "type": "string" }, "rank": { "type": "integer", "minimum": 1, "maximum": 6 } }
+        }
+      }
+    },
+    "gameFinished": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "GAME_FINISHED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["winnerId", "finishOrder", "placements"],
+          "properties": {
+            "winnerId": { "type": "string" },
+            "finishOrder": { "type": "array", "items": { "type": "string" }, "minItems": 3, "maxItems": 5 },
+            "placements": { "type": "array", "items": { "$ref": "#/$defs/placement" }, "minItems": 4, "maxItems": 6 }
+          }
+        }
+      }
+    },
+    "gameStateSync": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "GAME_STATE_SYNC" },
+        "payload": {
+          "type": "object", "additionalProperties": false, "required": ["room", "game"],
+          "properties": {
+            "room": { "$ref": "#/$defs/publicRoom" },
+            "game": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/gameState" }] }
+          }
+        }
+      }
+    },
+    "gameReset": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "GAME_RESET" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "requestedReplay", "requesterId"],
+          "properties": {
+            "status": { "const": "lobby" },
+            "requestedReplay": { "type": "boolean" },
+            "requesterId": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "error": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "ERROR" },
+        "payload": {
+          "type": "object", "additionalProperties": false, "required": ["code", "message"],
+          "properties": { "code": { "type": "string" }, "message": { "type": "string" } }
+        }
+      }
     }
   }
 }

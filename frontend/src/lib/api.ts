@@ -1,4 +1,5 @@
 import type {
+  CreatePracticePayload,
   CreateRoomPayload,
   JoinRoomPayload,
   PublicRoomState,
@@ -102,6 +103,7 @@ const isPublicPlayer = (value: unknown): boolean => {
     isPlayerColor(value.color) &&
     isFiniteInteger(value.seatIndex) &&
     typeof value.isHost === "boolean" &&
+    typeof value.isBot === "boolean" &&
     typeof value.isReady === "boolean" &&
     typeof value.isConnected === "boolean" &&
     (typeof value.reservationExpiresAt === "string" || value.reservationExpiresAt === null)
@@ -112,6 +114,7 @@ const isPublicRoomState = (value: unknown): value is PublicRoomState => {
   if (!isRecord(value) || !Array.isArray(value.players)) return false;
   return (
     isNonEmptyString(value.roomCode) &&
+    (value.mode === "friends" || value.mode === "practice") &&
     (value.status === "lobby" || value.status === "playing" || value.status === "finished") &&
     (value.maxPlayers === 4 || value.maxPlayers === 5 || value.maxPlayers === 6) &&
     isNonEmptyString(value.hostPlayerId) &&
@@ -128,6 +131,16 @@ const jsonRequest = (payload: object): RequestInit => ({
 
 export function createRoom(payload: CreateRoomPayload): Promise<RoomCredentials> {
   return request<RoomCredentials>("/api/rooms", isRoomCredentials, jsonRequest(payload));
+}
+
+export function createPracticeRoom(
+  payload: CreatePracticePayload,
+): Promise<RoomCredentials> {
+  return request<RoomCredentials>(
+    "/api/practice",
+    isRoomCredentials,
+    jsonRequest(payload),
+  );
 }
 
 export function joinRoom(
