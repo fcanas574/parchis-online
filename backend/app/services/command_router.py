@@ -5,13 +5,17 @@ from pydantic import TypeAdapter, ValidationError
 from app.game.models import RoomChange, SessionIdentity
 from app.schemas.websocket import (
     ClientMessage,
+    ChatMessageCommand,
+    GiftSentCommand,
     MoveBonusPieceCommand,
     MovePieceCommand,
     PlayAgainCommand,
     PlayerReadyCommand,
+    ReactionSentCommand,
     ReconnectCommand,
     ReturnToLobbyCommand,
     RollDiceCommand,
+    SetCosmeticsCommand,
     StartGameCommand,
 )
 from app.services.room_manager import RoomError, RoomManager
@@ -116,6 +120,32 @@ class CommandRouter:
                 change = await self._room_manager.play_again(
                     context.identity,
                     command.request_id,
+                )
+            elif isinstance(command, ChatMessageCommand):
+                change = await self._room_manager.send_chat_message(
+                    context.identity,
+                    command.request_id,
+                    command.text,
+                )
+            elif isinstance(command, ReactionSentCommand):
+                change = await self._room_manager.send_reaction(
+                    context.identity,
+                    command.request_id,
+                    command.reaction_id,
+                )
+            elif isinstance(command, GiftSentCommand):
+                change = await self._room_manager.send_gift(
+                    context.identity,
+                    command.request_id,
+                    command.to_player_id,
+                    command.gift_id,
+                )
+            elif isinstance(command, SetCosmeticsCommand):
+                change = await self._room_manager.set_cosmetics(
+                    context.identity,
+                    command.request_id,
+                    command.dice_skin_id,
+                    command.piece_skin_id,
                 )
             else:
                 return [

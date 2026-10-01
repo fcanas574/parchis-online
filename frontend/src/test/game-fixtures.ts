@@ -17,6 +17,9 @@ const players: PublicRoomState["players"] = [
     isReady: true,
     isConnected: true,
     reservationExpiresAt: null,
+    diceSkinId: "classic",
+    pieceSkinId: "classic",
+    lastReceivedGiftId: null,
   },
   {
     id: "p2",
@@ -28,6 +31,9 @@ const players: PublicRoomState["players"] = [
     isReady: true,
     isConnected: true,
     reservationExpiresAt: null,
+    diceSkinId: "classic",
+    pieceSkinId: "classic",
+    lastReceivedGiftId: null,
   },
   {
     id: "p3",
@@ -39,6 +45,9 @@ const players: PublicRoomState["players"] = [
     isReady: true,
     isConnected: true,
     reservationExpiresAt: null,
+    diceSkinId: "classic",
+    pieceSkinId: "classic",
+    lastReceivedGiftId: null,
   },
   {
     id: "p4",
@@ -50,6 +59,9 @@ const players: PublicRoomState["players"] = [
     isReady: true,
     isConnected: true,
     reservationExpiresAt: null,
+    diceSkinId: "classic",
+    pieceSkinId: "classic",
+    lastReceivedGiftId: null,
   },
 ];
 
@@ -80,6 +92,8 @@ export function gameStateFixture(
     winnerId: null,
     result: null,
     requiresSplitPlan: false,
+    turnNumber: 1,
+    lastRollsByPlayerId: {},
     ...overrides,
   };
 }

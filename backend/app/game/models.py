@@ -7,6 +7,9 @@ from typing import Literal
 PlayerColor = Literal["green", "red", "blue", "yellow", "purple", "orange"]
 SeatCount = Literal[4, 5, 6]
 PieceLocation = Literal["yard", "track", "finish_path", "finished"]
+DiceSkinId = Literal["classic", "brass", "jade", "midnight"]
+PieceSkinId = Literal["classic", "porcelain", "walnut", "glow"]
+GiftId = Literal["rose", "tomato", "applause", "confetti", "heart", "fire"]
 TurnPhase = Literal["waiting_for_roll", "waiting_for_move", "waiting_for_bonus", "finished"]
 GameStatus = Literal["playing", "finished"]
 BonusReason = Literal["capture", "goal"]
@@ -57,6 +60,21 @@ class GameParticipant:
     seat_index: int
 
 
+@dataclass(frozen=True, slots=True)
+class PlayerLastRoll:
+    values: tuple[int, int]
+    turn_number: int
+
+
+@dataclass(frozen=True, slots=True)
+class SocialChatMessage:
+    message_id: str
+    player_id: str
+    display_name: str
+    text: str
+    sent_at: datetime
+
+
 @dataclass(slots=True)
 class GameState:
     room_code: str
@@ -74,6 +92,8 @@ class GameState:
     winner_id: str | None
     result: "GameResult | None"
     requires_split_plan: bool = False
+    turn_number: int = 1
+    last_rolls_by_player_id: dict[str, PlayerLastRoll] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +130,9 @@ class PlayerState:
     token_hash: str = field(repr=False)
     is_bot: bool = False
     is_ready: bool = False
+    dice_skin_id: DiceSkinId = "classic"
+    piece_skin_id: PieceSkinId = "classic"
+    last_received_gift_id: GiftId | None = None
     is_connected: bool = False
     has_connected: bool = False
     reservation_expires_at: datetime | None = None
@@ -129,6 +152,7 @@ class RoomChange:
     payload: dict[str, object]
     request_id: str | None = None
     additional_events: tuple[DomainEvent, ...] = ()
+    include_state_sync: bool = True
 
 
 @dataclass(slots=True)
@@ -143,6 +167,7 @@ class RoomState:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     game_state: GameState | None = None
     last_game_result: GameResult | None = None
+    chat_messages: list[SocialChatMessage] = field(default_factory=list)
     processed_changes: OrderedDict[tuple[str, str], RoomChange] = field(
         default_factory=OrderedDict,
         repr=False,

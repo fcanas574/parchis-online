@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from app.game.autoplayer import AutopilotPolicy, NoLegalMoveError
 from app.game.models import (
@@ -23,11 +24,20 @@ from app.game.models import (
     RoomChange,
     RoomCredentialData,
     RoomState,
+    SocialChatMessage,
     SessionIdentity,
 )
 from app.game.rules import GameRules, IllegalMoveError
 from app.repositories.room_repository import RoomCodeCollisionError, RoomRepository
 from app.schemas.rooms import PlayerColor, PlayerCount
+from app.security.rate_limit import FixedWindowRateLimiter
+from app.services.social_policy import (
+    DICE_SKIN_IDS,
+    GIFT_IDS,
+    PIECE_SKIN_IDS,
+    REACTION_IDS,
+    normalize_chat_text,
+)
 
 
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -79,6 +89,21 @@ class RoomManager:
         self._reservation_ttl_seconds = reservation_ttl_seconds
         self._game_rules = game_rules or GameRules()
         self._autopilot = autopilot or AutopilotPolicy()
+        self._chat_rate_limiter = FixedWindowRateLimiter(
+            limit=5,
+            window_seconds=10,
+            clock=self._now,
+        )
+        self._reaction_rate_limiter = FixedWindowRateLimiter(
+            limit=8,
+            window_seconds=5,
+            clock=self._now,
+        )
+        self._gift_rate_limiter = FixedWindowRateLimiter(
+            limit=3,
+            window_seconds=10,
+            clock=self._now,
+        )
         self._room_locks: dict[str, _RoomLockEntry] = {}
         self._locks_guard = asyncio.Lock()
 
@@ -293,6 +318,9 @@ class RoomManager:
                     "reservationExpiresAt": self._isoformat(
                         player.reservation_expires_at
                     ),
+                    "diceSkinId": player.dice_skin_id,
+                    "pieceSkinId": player.piece_skin_id,
+                    "lastReceivedGiftId": player.last_received_gift_id,
                 }
                 for player in sorted(state.players, key=lambda item: item.seat_index)
             ],
@@ -341,6 +369,14 @@ class RoomManager:
             "winnerId": game.winner_id,
             "result": cls._public_game_result(game.result),
             "requiresSplitPlan": game.requires_split_plan,
+            "turnNumber": game.turn_number,
+            "lastRollsByPlayerId": {
+                player_id: {
+                    "values": list(last_roll.values),
+                    "turnNumber": last_roll.turn_number,
+                }
+                for player_id, last_roll in game.last_rolls_by_player_id.items()
+            },
         }
 
     @staticmethod
@@ -458,6 +494,186 @@ class RoomManager:
                     "reservationExpiresAt": self._isoformat(expires_at),
                 },
             )
+
+    async def send_chat_message(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+        text: str,
+    ) -> RoomChange:
+        identity = self._identity_from(session)
+        self._validate_room_code(identity.room_code)
+        self._validate_request_id(request_id)
+        if not isinstance(text, str) or len(text) > 280:
+            raise RoomError("INVALID_MESSAGE", "Chat messages must be at most 280 characters.")
+        normalized_text = normalize_chat_text(text)
+        if not normalized_text:
+            raise RoomError("INVALID_MESSAGE", "Chat messages cannot be empty.")
+
+        async with self._locked_room(identity.room_code):
+            room = await self._require_room(identity.room_code)
+            player = self._require_connected_player(room, identity.player_id)
+            cached = self._cached_change(room, player.id, request_id)
+            if cached is not None:
+                return cached
+            self._require_active_game(room)
+            if not self._chat_rate_limiter.allow(self._social_rate_key(identity)):
+                raise RoomError("RATE_LIMITED", "Chat message rate limit exceeded.")
+
+            message = SocialChatMessage(
+                message_id=uuid4().hex,
+                player_id=player.id,
+                display_name=player.display_name,
+                text=normalized_text,
+                sent_at=self._now(),
+            )
+            room.chat_messages.append(message)
+            del room.chat_messages[:-50]
+            change = self._snapshot_change(
+                room,
+                "CHAT_MESSAGE",
+                self._public_chat_message(message),
+                request_id,
+                include_state_sync=False,
+            )
+            self._cache_change(room, player.id, request_id, change)
+            await self._repository.save(room)
+            return copy.deepcopy(change)
+
+    async def send_reaction(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+        reaction_id: str,
+    ) -> RoomChange:
+        identity = self._identity_from(session)
+        self._validate_room_code(identity.room_code)
+        self._validate_request_id(request_id)
+        if not isinstance(reaction_id, str) or reaction_id not in REACTION_IDS:
+            raise RoomError("INVALID_REACTION", "Reaction is not available.")
+
+        async with self._locked_room(identity.room_code):
+            room = await self._require_room(identity.room_code)
+            player = self._require_connected_player(room, identity.player_id)
+            cached = self._cached_change(room, player.id, request_id)
+            if cached is not None:
+                return cached
+            self._require_active_game(room)
+            if not self._reaction_rate_limiter.allow(self._social_rate_key(identity)):
+                raise RoomError("RATE_LIMITED", "Reaction rate limit exceeded.")
+
+            change = self._snapshot_change(
+                room,
+                "REACTION_SENT",
+                {"playerId": player.id, "reactionId": reaction_id},
+                request_id,
+                include_state_sync=False,
+            )
+            self._cache_change(room, player.id, request_id, change)
+            await self._repository.save(room)
+            return copy.deepcopy(change)
+
+    async def send_gift(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+        recipient_id: str,
+        gift_id: str,
+    ) -> RoomChange:
+        identity = self._identity_from(session)
+        self._validate_room_code(identity.room_code)
+        self._validate_request_id(request_id)
+        if not isinstance(gift_id, str) or gift_id not in GIFT_IDS:
+            raise RoomError("INVALID_GIFT", "Gift is not available.")
+        if not isinstance(recipient_id, str) or not recipient_id:
+            raise RoomError("INVALID_GIFT_TARGET", "Gift recipient is invalid.")
+
+        async with self._locked_room(identity.room_code):
+            room = await self._require_room(identity.room_code)
+            player = self._require_connected_player(room, identity.player_id)
+            cached = self._cached_change(room, player.id, request_id)
+            if cached is not None:
+                return cached
+            self._require_active_game(room)
+            recipient = next(
+                (candidate for candidate in room.players if candidate.id == recipient_id),
+                None,
+            )
+            if recipient is None or recipient.id == player.id:
+                raise RoomError("INVALID_GIFT_TARGET", "Choose another player in this room.")
+            if not self._gift_rate_limiter.allow(self._social_rate_key(identity)):
+                raise RoomError("RATE_LIMITED", "Gift rate limit exceeded.")
+
+            recipient.last_received_gift_id = gift_id
+            room.state_version += 1
+            change = self._snapshot_change(
+                room,
+                "GIFT_SENT",
+                {
+                    "fromPlayerId": player.id,
+                    "toPlayerId": recipient.id,
+                    "giftId": gift_id,
+                },
+                request_id,
+            )
+            self._cache_change(room, player.id, request_id, change)
+            await self._repository.save(room)
+            return copy.deepcopy(change)
+
+    async def set_cosmetics(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+        request_id: str,
+        dice_skin_id: str,
+        piece_skin_id: str,
+    ) -> RoomChange:
+        identity = self._identity_from(session)
+        self._validate_room_code(identity.room_code)
+        self._validate_request_id(request_id)
+        if (
+            not isinstance(dice_skin_id, str)
+            or dice_skin_id not in DICE_SKIN_IDS
+            or not isinstance(piece_skin_id, str)
+            or piece_skin_id not in PIECE_SKIN_IDS
+        ):
+            raise RoomError("INVALID_COSMETICS", "One or more selected skins are unavailable.")
+
+        async with self._locked_room(identity.room_code):
+            room = await self._require_room(identity.room_code)
+            player = self._require_connected_player(room, identity.player_id)
+            cached = self._cached_change(room, player.id, request_id)
+            if cached is not None:
+                return cached
+            if room.status == "finished":
+                raise RoomError("GAME_FINISHED", "Cosmetics cannot change after the game ends.")
+
+            player.dice_skin_id = dice_skin_id
+            player.piece_skin_id = piece_skin_id
+            room.state_version += 1
+            change = self._snapshot_change(
+                room,
+                "PLAYER_COSMETICS_UPDATED",
+                {
+                    "playerId": player.id,
+                    "diceSkinId": dice_skin_id,
+                    "pieceSkinId": piece_skin_id,
+                },
+                request_id,
+            )
+            self._cache_change(room, player.id, request_id, change)
+            await self._repository.save(room)
+            return copy.deepcopy(change)
+
+    async def recent_chat_history(
+        self,
+        session: AuthenticatedSession | SessionIdentity,
+    ) -> list[dict[str, object]]:
+        identity = self._identity_from(session)
+        self._validate_room_code(identity.room_code)
+        async with self._locked_room(identity.room_code):
+            room = await self._require_room(identity.room_code)
+            self._require_connected_player(room, identity.player_id)
+            return [self._public_chat_message(message) for message in room.chat_messages[-50:]]
 
     async def set_ready(
         self,
@@ -890,6 +1106,35 @@ class RoomManager:
             raise RoomError("UNAUTHENTICATED", "Invalid room credentials.")
         return player
 
+    @classmethod
+    def _require_connected_player(cls, room: RoomState, player_id: str) -> PlayerState:
+        player = cls._require_player(room, player_id)
+        if not player.is_connected:
+            raise cls._unauthenticated()
+        return player
+
+    @staticmethod
+    def _require_active_game(room: RoomState) -> None:
+        if room.status != "playing" or room.game_state is None:
+            raise RoomError("GAME_NOT_ACTIVE", "The game is not active.")
+
+    @staticmethod
+    def _social_rate_key(identity: SessionIdentity) -> str:
+        return f"{identity.room_code}:{identity.player_id}"
+
+    @classmethod
+    def _public_chat_message(
+        cls,
+        message: SocialChatMessage,
+    ) -> dict[str, object]:
+        return {
+            "messageId": message.message_id,
+            "playerId": message.player_id,
+            "displayName": message.display_name,
+            "text": message.text,
+            "sentAt": cls._isoformat(message.sent_at),
+        }
+
     @asynccontextmanager
     async def _locked_room(
         self,
@@ -998,6 +1243,7 @@ class RoomManager:
         request_id: str | None = None,
         *,
         additional_events: tuple[DomainEvent, ...] = (),
+        include_state_sync: bool = True,
     ) -> RoomChange:
         state_snapshot = copy.deepcopy(room)
         state_snapshot.processed_changes.clear()
@@ -1007,6 +1253,7 @@ class RoomManager:
             payload=copy.deepcopy(payload),
             request_id=request_id,
             additional_events=copy.deepcopy(additional_events),
+            include_state_sync=include_state_sync,
         )
 
     @staticmethod

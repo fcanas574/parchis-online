@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { LandingPage } from "@/components/home/LandingPage";
 import { GameTable } from "@/components/game/GameTable";
@@ -9,7 +9,17 @@ import { Card } from "@/components/ui/card";
 import { useGameSocket } from "@/hooks/useGameSocket";
 import { getRoom } from "@/lib/api";
 import { readSession, type RoomSession } from "@/lib/session";
+import { unlockGameAudio } from "@/lib/audio";
+import {
+  DEFAULT_PLAYER_PREFERENCES,
+  readPlayerPreferences,
+  writePlayerPreferences,
+  type PlayerPreferences,
+} from "@/lib/player-preferences";
 import { useGameStore } from "@/stores/gameStore";
+import type { ChatMessage } from "@/types/game";
+
+const EMPTY_CHAT_MESSAGES: readonly ChatMessage[] = [];
 
 function RoomSessionSurface({
   roomCode,
@@ -19,6 +29,7 @@ function RoomSessionSurface({
   session: RoomSession;
 }) {
   const actions = useGameSocket(roomCode);
+  const [preferences, setPreferences] = useState<PlayerPreferences>(DEFAULT_PLAYER_PREFERENCES);
   const room = useGameStore((state) =>
     state.room?.roomCode === roomCode ? state.room : null,
   );
@@ -30,6 +41,40 @@ function RoomSessionSurface({
     ),
   );
   const recentEvents = useGameStore((state) => state.recentEvents);
+  const chatMessages = useGameStore((state) =>
+    state.chatRoomCode === roomCode ? state.chatMessages : EMPTY_CHAT_MESSAGES,
+  );
+  const chatHistoryReady = useGameStore((state) =>
+    state.chatRoomCode === roomCode && state.chatHistoryReady,
+  );
+
+  useEffect(() => {
+    setPreferences(readPlayerPreferences());
+  }, []);
+
+  useEffect(() => {
+    const unlock = () => {
+      void unlockGameAudio();
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+    window.addEventListener("pointerdown", unlock, { passive: true });
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
+
+  const handlePreferencesChange = useCallback((next: PlayerPreferences) => {
+    const cosmeticsChanged = next.diceSkinId !== preferences.diceSkinId ||
+      next.pieceSkinId !== preferences.pieceSkinId;
+    setPreferences(next);
+    writePlayerPreferences(next);
+    if (cosmeticsChanged && room?.status !== "finished") {
+      actions.setCosmetics(next.diceSkinId, next.pieceSkinId);
+    }
+  }, [actions.setCosmetics, preferences.diceSkinId, preferences.pieceSkinId, room?.status]);
 
   if (
     room?.gameState &&
@@ -45,11 +90,22 @@ function RoomSessionSurface({
         authenticationFailed={lastError?.code === "UNAUTHENTICATED"}
         rollEvent={rollEvent?.type === "DICE_ROLLED" ? rollEvent : undefined}
         events={recentEvents}
+        chatMessages={chatMessages}
+        chatHistoryReady={chatHistoryReady}
+        preferences={preferences}
+        onPreferencesChange={handlePreferencesChange}
       />
     );
   }
 
-  return <Lobby roomCode={roomCode} actions={actions} />;
+  return (
+    <Lobby
+      roomCode={roomCode}
+      actions={actions}
+      preferences={preferences}
+      onPreferencesChange={handlePreferencesChange}
+    />
+  );
 }
 
 export function RoomPageClient({ code }: { code: string }) {

@@ -287,6 +287,20 @@ async def room_websocket(
                     )
                     failures = await broadcast_change(presence_change)
                     await disconnect_connections(failures)
+
+                if await connection_manager.is_current(connection):
+                    chat_history = await room_manager.recent_chat_history(
+                        authenticated.identity
+                    )
+                    await send_connection_event(
+                        connection,
+                        make_event(
+                            "CHAT_HISTORY_SYNC",
+                            room_code,
+                            state.state_version,
+                            {"messages": chat_history},
+                        ),
+                    )
         except RoomError as error:
             await send_handshake_error(error)
             return

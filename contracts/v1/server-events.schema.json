@@ -19,12 +19,36 @@
     { "$ref": "#/$defs/gameFinished" },
     { "$ref": "#/$defs/gameStateSync" },
     { "$ref": "#/$defs/gameReset" },
+    { "$ref": "#/$defs/chatHistorySync" },
+    { "$ref": "#/$defs/chatMessageEvent" },
+    { "$ref": "#/$defs/reactionSent" },
+    { "$ref": "#/$defs/giftSent" },
+    { "$ref": "#/$defs/playerCosmeticsUpdated" },
     { "$ref": "#/$defs/error" }
   ],
   "$defs": {
     "roomCode": { "type": "string", "pattern": "^[A-Z2-9]{5}$" },
     "diceIndex": { "type": "integer", "minimum": 0, "maximum": 1 },
     "dieValue": { "type": "integer", "minimum": 1, "maximum": 6 },
+    "playerId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "reactionId": {
+      "enum": ["laugh", "cry", "angry", "cool", "shocked", "heart", "applause"]
+    },
+    "giftId": { "enum": ["rose", "tomato", "applause", "confetti", "heart", "fire"] },
+    "diceSkinId": { "enum": ["classic", "brass", "jade", "midnight"] },
+    "pieceSkinId": { "enum": ["classic", "porcelain", "walnut", "glow"] },
+    "chatMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageId", "playerId", "displayName", "text", "sentAt"],
+      "properties": {
+        "messageId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "playerId": { "$ref": "#/$defs/playerId" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 280 },
+        "sentAt": { "type": "string", "format": "date-time" }
+      }
+    },
     "placement": {
       "type": "object",
       "additionalProperties": false,
@@ -106,6 +130,18 @@
         "reason": { "enum": ["capture", "goal"] }
       }
     },
+    "playerLastRoll": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["values", "turnNumber"],
+      "properties": {
+        "values": {
+          "type": "array", "items": { "$ref": "#/$defs/dieValue" },
+          "minItems": 2, "maxItems": 2
+        },
+        "turnNumber": { "type": "integer", "minimum": 1 }
+      }
+    },
     "gameState": {
       "type": "object",
       "additionalProperties": false,
@@ -113,7 +149,7 @@
         "roomCode", "seatCount", "status", "playerOrder", "currentPlayerId",
         "turnPhase", "diceValues", "usedDiceIndices", "availableMoves",
         "pendingBonuses", "pieces", "finishOrder", "winnerId", "result",
-        "requiresSplitPlan"
+        "requiresSplitPlan", "turnNumber", "lastRollsByPlayerId"
       ],
       "properties": {
         "roomCode": { "$ref": "#/$defs/roomCode" },
@@ -146,7 +182,12 @@
         "finishOrder": { "type": "array", "items": { "type": "string" }, "maxItems": 6 },
         "winnerId": { "type": ["string", "null"] },
         "result": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/gameResult" }] },
-        "requiresSplitPlan": { "type": "boolean" }
+        "requiresSplitPlan": { "type": "boolean" },
+        "turnNumber": { "type": "integer", "minimum": 1 },
+        "lastRollsByPlayerId": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/playerLastRoll" }
+        }
       }
     },
     "player": {
@@ -154,7 +195,8 @@
       "additionalProperties": false,
       "required": [
         "id", "displayName", "color", "seatIndex", "isHost", "isBot", "isReady",
-        "isConnected", "reservationExpiresAt"
+        "isConnected", "reservationExpiresAt", "diceSkinId", "pieceSkinId",
+        "lastReceivedGiftId"
       ],
       "properties": {
         "id": { "type": "string" },
@@ -165,7 +207,15 @@
         "isBot": { "type": "boolean" },
         "isReady": { "type": "boolean" },
         "isConnected": { "type": "boolean" },
-        "reservationExpiresAt": { "type": ["string", "null"], "format": "date-time" }
+        "reservationExpiresAt": { "type": ["string", "null"], "format": "date-time" },
+        "diceSkinId": { "enum": ["classic", "brass", "jade", "midnight"] },
+        "pieceSkinId": { "enum": ["classic", "porcelain", "walnut", "glow"] },
+        "lastReceivedGiftId": {
+          "oneOf": [
+            { "type": "null" },
+            { "enum": ["rose", "tomato", "applause", "confetti", "heart", "fire"] }
+          ]
+        }
       }
     },
     "publicRoom": {
@@ -401,6 +451,72 @@
             "status": { "const": "lobby" },
             "requestedReplay": { "type": "boolean" },
             "requesterId": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "chatHistorySync": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "CHAT_HISTORY_SYNC" },
+        "payload": {
+          "type": "object", "additionalProperties": false, "required": ["messages"],
+          "properties": {
+            "messages": {
+              "type": "array", "items": { "$ref": "#/$defs/chatMessage" },
+              "maxItems": 50
+            }
+          }
+        }
+      }
+    },
+    "chatMessageEvent": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "CHAT_MESSAGE" },
+        "payload": { "$ref": "#/$defs/chatMessage" }
+      }
+    },
+    "reactionSent": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "REACTION_SENT" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "reactionId"],
+          "properties": {
+            "playerId": { "$ref": "#/$defs/playerId" },
+            "reactionId": { "$ref": "#/$defs/reactionId" }
+          }
+        }
+      }
+    },
+    "giftSent": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "GIFT_SENT" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["fromPlayerId", "toPlayerId", "giftId"],
+          "properties": {
+            "fromPlayerId": { "$ref": "#/$defs/playerId" },
+            "toPlayerId": { "$ref": "#/$defs/playerId" },
+            "giftId": { "$ref": "#/$defs/giftId" }
+          }
+        }
+      }
+    },
+    "playerCosmeticsUpdated": {
+      "$ref": "#/$defs/envelope",
+      "properties": {
+        "type": { "const": "PLAYER_COSMETICS_UPDATED" },
+        "payload": {
+          "type": "object", "additionalProperties": false,
+          "required": ["playerId", "diceSkinId", "pieceSkinId"],
+          "properties": {
+            "playerId": { "$ref": "#/$defs/playerId" },
+            "diceSkinId": { "$ref": "#/$defs/diceSkinId" },
+            "pieceSkinId": { "$ref": "#/$defs/pieceSkinId" }
           }
         }
       }

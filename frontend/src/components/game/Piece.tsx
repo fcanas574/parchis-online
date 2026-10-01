@@ -71,6 +71,21 @@ export function Piece({
           ? `en el pasillo final, casilla ${(piece.finishProgress ?? 0) + 1}`
           : "en la meta";
   const accessibleName = `${player.displayName}, ficha ${pieceNumber}, ${locationLabel}${legalMove ? selectable ? `. ${moveLabel}` : ". movimiento posible; espera tu turno" : ""}`;
+  const borderColor = player.pieceSkinId === "porcelain"
+    ? "#fff3db"
+    : player.pieceSkinId === "walnut"
+      ? "#543523"
+      : "var(--color-room-night)";
+  const baseShadow = legalMove
+    ? "0 0 0 2px var(--color-parchment), 0 0 14px color-mix(in srgb, var(--color-focus) 68%, transparent), 0 4px 7px rgba(0,0,0,.42), inset 0 2px 0 rgba(255,255,255,.38)"
+    : "0 3px 6px rgba(0,0,0,.38), inset 0 2px 0 rgba(255,255,255,.34)";
+  const skinShadow = player.pieceSkinId === "porcelain"
+    ? `${baseShadow}, inset 0 -2px 3px rgba(255,255,255,.36)`
+    : player.pieceSkinId === "walnut"
+      ? `${baseShadow}, inset 0 -3px 4px rgba(38,19,8,.42)`
+      : player.pieceSkinId === "glow"
+        ? `${baseShadow}, 0 0 10px color-mix(in srgb, ${PIECE_COLORS[player.color]} 58%, white)`
+        : baseShadow;
 
   return (
     <motion.button
@@ -108,19 +123,18 @@ export function Piece({
     >
       <span
         className="parchis-piece-token"
+        data-skin={player.pieceSkinId}
         aria-hidden="true"
         style={{
           display: "grid",
           width: piece.state === "finished" ? "clamp(12px, 1.8vw, 20px)" : "clamp(18px, 3.2vw, 32px)",
           height: piece.state === "finished" ? "clamp(12px, 1.8vw, 20px)" : "clamp(18px, 3.2vw, 32px)",
           placeItems: "center",
-          border: "2px solid var(--color-room-night)",
+          border: `2px solid ${borderColor}`,
           borderRadius: "50%",
           color: "var(--color-room-night)",
           backgroundColor: PIECE_COLORS[player.color],
-          boxShadow: legalMove
-            ? "0 0 0 2px var(--color-parchment), 0 0 14px color-mix(in srgb, var(--color-focus) 68%, transparent), 0 4px 7px rgba(0,0,0,.42), inset 0 2px 0 rgba(255,255,255,.38)"
-            : "0 3px 6px rgba(0,0,0,.38), inset 0 2px 0 rgba(255,255,255,.34)",
+          boxShadow: skinShadow,
           fontSize: piece.state === "finished" ? "clamp(0.42rem, 1vw, 0.62rem)" : "clamp(0.62rem, 1.8vw, 0.85rem)",
           fontWeight: 900,
           lineHeight: 1,

@@ -1,28 +1,39 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Board } from "@/components/game/Board";
-import { Dice } from "@/components/game/Dice";
+import { GameSettings } from "@/components/game/GameSettings";
+import { PlayerSeat } from "@/components/game/PlayerSeat";
 import { TurnIndicator } from "@/components/game/TurnIndicator";
 import { VictoryModal, type VictoryActions } from "@/components/game/VictoryModal";
 import { getBoardLayout } from "@/lib/board-layouts";
+import { playGameSound } from "@/lib/audio";
+import { DEFAULT_PLAYER_PREFERENCES, type PlayerPreferences } from "@/lib/player-preferences";
 import { usePiecePresentation } from "@/hooks/usePiecePresentation";
 import { Badge } from "@/components/ui/badge";
+import { ChatPanel } from "@/components/social/ChatPanel";
+import { ReactionBar } from "@/components/social/ReactionBar";
+import { SocialEffectsLayer } from "@/components/social/SocialEffectsLayer";
 import type { ConnectionState } from "@/stores/gameStore";
 import type { ServerEvent } from "@/types/protocol";
 import type {
+  ChatMessage,
   DiceIndex,
+  GiftId,
   GameState,
   PlayerPlacement,
-  PublicPlayer,
   PublicRoomState,
+  ReactionId,
 } from "@/types/game";
 
 export type GameTableActions = VictoryActions & {
   sendRollDice: () => boolean | void;
   sendMovePiece: (pieceId: string, diceIndices: DiceIndex[]) => boolean | void;
   sendMoveBonusPiece: (pieceId: string) => boolean | void;
+  sendChatMessage: (text: string) => boolean | void;
+  sendReaction: (reactionId: ReactionId) => boolean | void;
+  sendGift: (playerId: string, giftId: GiftId) => boolean | void;
 };
 
 type GameTableProps = {
@@ -34,6 +45,10 @@ type GameTableProps = {
   authenticationFailed?: boolean;
   rollEvent?: Extract<ServerEvent, { type: "DICE_ROLLED" }>;
   events?: readonly ServerEvent[];
+  chatMessages?: readonly ChatMessage[];
+  chatHistoryReady?: boolean;
+  preferences?: PlayerPreferences;
+  onPreferencesChange?: (preferences: PlayerPreferences) => void;
 };
 
 const CONNECTION_COPY: Record<ConnectionState, string> = {
@@ -44,6 +59,10 @@ const CONNECTION_COPY: Record<ConnectionState, string> = {
   disconnected: "Sin conexión. Tus acciones están pausadas.",
   error: "La conexión necesita atención.",
 };
+
+const EMPTY_EVENTS: readonly ServerEvent[] = [];
+const EMPTY_CHAT_MESSAGES: readonly ChatMessage[] = [];
+const NOOP_PREFERENCES_CHANGE = () => undefined;
 
 function makePlacements(room: PublicRoomState, game: GameState): PlayerPlacement[] {
   if (game.result?.placements.length) {
@@ -99,29 +118,43 @@ export function GameTable({
   connectionState = "connected",
   authenticationFailed = false,
   rollEvent,
-  events = [],
+  events = EMPTY_EVENTS,
+  chatMessages = EMPTY_CHAT_MESSAGES,
+  chatHistoryReady = true,
+  preferences = DEFAULT_PLAYER_PREFERENCES,
+  onPreferencesChange = NOOP_PREFERENCES_CHANGE,
 }: GameTableProps) {
+  const presentationRoom = useMemo<PublicRoomState>(() => ({
+    ...room,
+    players: room.players.map((player) => player.id === currentPlayerId
+      ? { ...player, diceSkinId: preferences.diceSkinId, pieceSkinId: preferences.pieceSkinId }
+      : player),
+  }), [room, currentPlayerId, preferences.diceSkinId, preferences.pieceSkinId]);
   const { visualPieces, isAnimating, isAnimatingOwnMove } = usePiecePresentation(
     game,
-    room.roomCode,
-    room.stateVersion,
+    presentationRoom.roomCode,
+    presentationRoom.stateVersion,
     currentPlayerId,
     events,
     connectionState,
   );
-  const activePlayer = room.players.find(
+  const activePlayer = presentationRoom.players.find(
     (player) => player.id === game.currentPlayerId,
   );
   const isConnected = connectionState === "connected";
   const activePlayerConnected = activePlayer?.isConnected === true;
   const canPlay = isConnected && activePlayerConnected;
   const canInteract = canPlay && !isAnimatingOwnMove;
-  const placements = makePlacements(room, game);
+  const canSendSocial = game.status === "playing" && isConnected;
+  const placements = makePlacements(presentationRoom, game);
   const placementByPlayerId = new Map(
     placements.map((placement) => [placement.playerId, placement]),
   );
-  const playerRows = playersAroundBoard(room, game, currentPlayerId);
+  const playerRows = playersAroundBoard(presentationRoom, game, currentPlayerId);
   const [heldRoll, setHeldRoll] = useState<GameTableProps["rollEvent"]>();
+  const [chatOpen, setChatOpen] = useState(false);
+  const [giftMenuOpenFor, setGiftMenuOpenFor] = useState<string | null>(null);
+  const seenSoundEventIdsRef = useRef(new Set(events.map((event) => event.eventId)));
   useEffect(() => {
     if (!rollEvent || rollEvent.stateVersion < room.stateVersion - 1) return;
     setHeldRoll(rollEvent);
@@ -130,6 +163,19 @@ export function GameTable({
     // A later sync must not restart the brief presentation of this event.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rollEvent?.eventId]);
+  useEffect(() => {
+    for (const event of events) {
+      if (seenSoundEventIdsRef.current.has(event.eventId)) continue;
+      seenSoundEventIdsRef.current.add(event.eventId);
+      if (event.type === "DICE_ROLLED") {
+        playGameSound("dice_roll", preferences);
+      } else if (event.type === "PIECE_MOVED") {
+        playGameSound(event.payload.to.state === "finished" ? "goal" : "piece_move", preferences);
+      } else if (event.type === "PIECE_CAPTURED") {
+        playGameSound("capture", preferences);
+      }
+    }
+  }, [events, preferences]);
   const matchingDice = rollEvent && game.diceValues &&
     game.diceValues[0] === rollEvent.payload.values[0] &&
     game.diceValues[1] === rollEvent.payload.values[1];
@@ -138,7 +184,6 @@ export function GameTable({
     ? rollEvent
     : undefined;
   const visibleRoll = heldRoll ?? currentRoll;
-  const diceOwnerId = visibleRoll?.payload.playerId ?? game.currentPlayerId;
 
   const handleSelectPiece = (pieceId: string, diceIndices: DiceIndex[]) => {
     if (!canInteract || game.currentPlayerId !== currentPlayerId) return;
@@ -153,42 +198,33 @@ export function GameTable({
     ? "No pudimos autenticar esta sesión. Vuelve al inicio para entrar de nuevo."
     : CONNECTION_COPY[connectionState];
 
-  const renderPlayer = (player: PublicPlayer) => {
-    const isActive = player.id === game.currentPlayerId;
-    const placement = placementByPlayerId.get(player.id);
-    return (
-      <li
-        key={player.id}
-        className={`game-seat${isActive ? " game-seat-active" : ""}`}
-        style={{ "--player-color": `var(--color-piece-${player.color})` } as CSSProperties}
-        aria-current={isActive ? "step" : undefined}
-      >
-        <span className="game-seat-avatar" aria-hidden="true">{player.displayName.slice(0, 1).toUpperCase()}</span>
-        <span className="game-seat-copy">
-          <span className="game-player-name">{player.displayName}{player.id === currentPlayerId ? " · Tú" : ""}</span>
-          <span className="game-seat-status">
-            {placement
-              ? `${placement.rank}.º`
-              : player.isBot
-                ? "Bot"
-                : player.isConnected
-                  ? "En juego"
-                  : "Automático"}
-          </span>
-        </span>
-        {player.id === diceOwnerId ? (
-          <Dice
-            game={game}
-            currentPlayerId={currentPlayerId}
-            activePlayer={player}
-            connectionState={connectionState}
-            onRoll={actions.sendRollDice}
-            rollEvent={visibleRoll}
-          />
-        ) : null}
-      </li>
-    );
-  };
+  const renderPlayer = (player: (typeof presentationRoom.players)[number]) => (
+    <PlayerSeat
+      key={player.id}
+      player={player}
+      currentPlayerId={currentPlayerId}
+      game={game}
+      connectionState={connectionState}
+      lastRoll={game.lastRollsByPlayerId[player.id] ?? null}
+      isActive={player.id === game.currentPlayerId}
+      canRoll={
+        canInteract &&
+        player.id === game.currentPlayerId &&
+        game.currentPlayerId === currentPlayerId &&
+        game.status === "playing" &&
+        game.turnPhase === "waiting_for_roll"
+      }
+      diceSkinId={player.id === currentPlayerId ? preferences.diceSkinId : player.diceSkinId}
+      rollEvent={visibleRoll}
+      placement={placementByPlayerId.get(player.id)?.rank}
+      onRoll={actions.sendRollDice}
+      onOpenGiftMenu={setGiftMenuOpenFor}
+      onSendGift={actions.sendGift}
+      canSendGift={canSendSocial}
+      giftMenuOpen={giftMenuOpenFor === player.id}
+      onCloseGiftMenu={() => setGiftMenuOpenFor(null)}
+    />
+  );
 
   return (
     <main className="app-shell game-shell">
@@ -198,6 +234,19 @@ export function GameTable({
           <h1>Mesa de juego</h1>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          <GameSettings
+            preferences={preferences}
+            onChange={onPreferencesChange}
+            cosmeticsDisabled={game.status === "finished"}
+          />
+          <ChatPanel
+            messages={chatMessages}
+            isOpen={chatOpen}
+            onToggle={() => setChatOpen((open) => !open)}
+            onSendMessage={actions.sendChatMessage}
+            disabled={!canSendSocial}
+            historyReady={chatHistoryReady}
+          />
           {room.mode === "practice" ? <Badge tone="info">Práctica</Badge> : null}
           <Badge tone={isConnected ? "success" : "warning"}>Sala {room.roomCode}</Badge>
         </div>
@@ -227,7 +276,7 @@ export function GameTable({
               {playerRows.top.map(renderPlayer)}
             </ol>
             <Board
-              room={room}
+              room={presentationRoom}
               game={game}
               currentPlayerId={currentPlayerId}
               interactionEnabled={canInteract}
@@ -238,7 +287,10 @@ export function GameTable({
               {playerRows.bottom.map(renderPlayer)}
             </ol>
           </div>
+          <ReactionBar onSendReaction={actions.sendReaction} disabled={!canSendSocial} />
       </section>
+
+      <SocialEffectsLayer players={presentationRoom.players} events={events} preferences={preferences} />
 
       {game.status === "finished" && !isAnimating ? (
         <VictoryModal

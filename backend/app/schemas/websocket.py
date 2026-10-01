@@ -15,6 +15,10 @@ from .rooms import PlayerColor
 
 DieValue = Annotated[StrictInt, Field(ge=1, le=6)]
 DiceIndex = Annotated[StrictInt, Field(ge=0, le=1)]
+DiceSkinId = Literal["classic", "brass", "jade", "midnight"]
+PieceSkinId = Literal["classic", "porcelain", "walnut", "glow"]
+GiftId = Literal["rose", "tomato", "applause", "confetti", "heart", "fire"]
+ReactionId = Literal["laugh", "cry", "angry", "cool", "shocked", "heart", "applause"]
 
 
 class WireModel(BaseModel):
@@ -85,6 +89,36 @@ class PlayAgainCommand(WireModel):
     request_id: str = Field(alias="requestId", min_length=1, max_length=64)
 
 
+class ChatMessageCommand(WireModel):
+    type: Literal["CHAT_MESSAGE"]
+    version: Literal[1]
+    request_id: str = Field(alias="requestId", min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=280)
+
+
+class ReactionSentCommand(WireModel):
+    type: Literal["REACTION_SENT"]
+    version: Literal[1]
+    request_id: str = Field(alias="requestId", min_length=1, max_length=64)
+    reaction_id: ReactionId = Field(alias="reactionId")
+
+
+class GiftSentCommand(WireModel):
+    type: Literal["GIFT_SENT"]
+    version: Literal[1]
+    request_id: str = Field(alias="requestId", min_length=1, max_length=64)
+    to_player_id: str = Field(alias="toPlayerId", min_length=1, max_length=64)
+    gift_id: GiftId = Field(alias="giftId")
+
+
+class SetCosmeticsCommand(WireModel):
+    type: Literal["SET_COSMETICS"]
+    version: Literal[1]
+    request_id: str = Field(alias="requestId", min_length=1, max_length=64)
+    dice_skin_id: DiceSkinId = Field(alias="diceSkinId")
+    piece_skin_id: PieceSkinId = Field(alias="pieceSkinId")
+
+
 ClientMessage = Annotated[
     ReconnectCommand
     | PlayerReadyCommand
@@ -93,7 +127,11 @@ ClientMessage = Annotated[
     | MovePieceCommand
     | MoveBonusPieceCommand
     | ReturnToLobbyCommand
-    | PlayAgainCommand,
+    | PlayAgainCommand
+    | ChatMessageCommand
+    | ReactionSentCommand
+    | GiftSentCommand
+    | SetCosmeticsCommand,
     Field(discriminator="type"),
 ]
 
@@ -108,6 +146,9 @@ class PublicPlayer(WireModel):
     is_ready: StrictBool = Field(alias="isReady")
     is_connected: StrictBool = Field(alias="isConnected")
     reservation_expires_at: datetime | None = Field(alias="reservationExpiresAt")
+    dice_skin_id: DiceSkinId = Field(alias="diceSkinId")
+    piece_skin_id: PieceSkinId = Field(alias="pieceSkinId")
+    last_received_gift_id: GiftId | None = Field(alias="lastReceivedGiftId")
 
 
 class PublicPiecePosition(WireModel):
@@ -154,6 +195,19 @@ class PublicGameResult(WireModel):
     placements: list[PublicPlacement] = Field(min_length=4, max_length=6)
 
 
+class PublicPlayerLastRoll(WireModel):
+    values: Annotated[list[DieValue], Field(min_length=2, max_length=2)]
+    turn_number: StrictInt = Field(alias="turnNumber", ge=1)
+
+
+class ChatMessage(WireModel):
+    message_id: str = Field(alias="messageId", min_length=1, max_length=64)
+    player_id: str = Field(alias="playerId", min_length=1, max_length=64)
+    display_name: str = Field(alias="displayName", min_length=1, max_length=24)
+    text: str = Field(min_length=1, max_length=280)
+    sent_at: datetime = Field(alias="sentAt")
+
+
 class PublicGameState(WireModel):
     room_code: str = Field(alias="roomCode", pattern=r"^[A-Z2-9]{5}$")
     seat_count: Literal[4, 5, 6] = Field(alias="seatCount")
@@ -177,6 +231,10 @@ class PublicGameState(WireModel):
     winner_id: str | None = Field(alias="winnerId")
     result: PublicGameResult | None
     requires_split_plan: StrictBool = Field(alias="requiresSplitPlan")
+    turn_number: StrictInt = Field(alias="turnNumber", ge=1)
+    last_rolls_by_player_id: dict[str, PublicPlayerLastRoll] = Field(
+        alias="lastRollsByPlayerId"
+    )
 
 
 class PublicRoomState(WireModel):
@@ -279,6 +337,27 @@ class GameResetPayload(WireModel):
     requester_id: str = Field(alias="requesterId", min_length=1)
 
 
+class ChatHistorySyncPayload(WireModel):
+    messages: list[ChatMessage] = Field(max_length=50)
+
+
+class ReactionSentPayload(WireModel):
+    player_id: str = Field(alias="playerId", min_length=1, max_length=64)
+    reaction_id: ReactionId = Field(alias="reactionId")
+
+
+class GiftSentPayload(WireModel):
+    from_player_id: str = Field(alias="fromPlayerId", min_length=1, max_length=64)
+    to_player_id: str = Field(alias="toPlayerId", min_length=1, max_length=64)
+    gift_id: GiftId = Field(alias="giftId")
+
+
+class PlayerCosmeticsUpdatedPayload(WireModel):
+    player_id: str = Field(alias="playerId", min_length=1, max_length=64)
+    dice_skin_id: DiceSkinId = Field(alias="diceSkinId")
+    piece_skin_id: PieceSkinId = Field(alias="pieceSkinId")
+
+
 class ErrorPayload(WireModel):
     code: str
     message: str
@@ -373,6 +452,31 @@ class GameResetEvent(ServerEventEnvelope):
     payload: GameResetPayload
 
 
+class ChatHistorySyncEvent(ServerEventEnvelope):
+    type: Literal["CHAT_HISTORY_SYNC"]
+    payload: ChatHistorySyncPayload
+
+
+class ChatMessageEvent(ServerEventEnvelope):
+    type: Literal["CHAT_MESSAGE"]
+    payload: ChatMessage
+
+
+class ReactionSentEvent(ServerEventEnvelope):
+    type: Literal["REACTION_SENT"]
+    payload: ReactionSentPayload
+
+
+class GiftSentEvent(ServerEventEnvelope):
+    type: Literal["GIFT_SENT"]
+    payload: GiftSentPayload
+
+
+class PlayerCosmeticsUpdatedEvent(ServerEventEnvelope):
+    type: Literal["PLAYER_COSMETICS_UPDATED"]
+    payload: PlayerCosmeticsUpdatedPayload
+
+
 class ErrorEvent(ServerEventEnvelope):
     type: Literal["ERROR"]
     payload: ErrorPayload
@@ -395,6 +499,11 @@ ServerEvent = Annotated[
     | GameFinishedEvent
     | GameStateSyncEvent
     | GameResetEvent
+    | ChatHistorySyncEvent
+    | ChatMessageEvent
+    | ReactionSentEvent
+    | GiftSentEvent
+    | PlayerCosmeticsUpdatedEvent
     | ErrorEvent,
     Field(discriminator="type"),
 ]

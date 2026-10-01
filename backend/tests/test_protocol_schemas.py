@@ -226,6 +226,156 @@ def test_gameplay_commands_validate_against_pydantic_and_json_schema(message):
     validate(message, load_schema("protocol.schema.json"))
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        {
+            "type": "CHAT_MESSAGE",
+            "version": 1,
+            "requestId": "chat-1",
+            "text": "¡Hola! 😂",
+        },
+        {
+            "type": "REACTION_SENT",
+            "version": 1,
+            "requestId": "reaction-1",
+            "reactionId": "laugh",
+        },
+        {
+            "type": "GIFT_SENT",
+            "version": 1,
+            "requestId": "gift-1",
+            "toPlayerId": "player-2",
+            "giftId": "rose",
+        },
+        {
+            "type": "SET_COSMETICS",
+            "version": 1,
+            "requestId": "cosmetics-1",
+            "diceSkinId": "jade",
+            "pieceSkinId": "porcelain",
+        },
+    ],
+)
+def test_social_commands_validate_against_pydantic_and_json_schema(message):
+    TypeAdapter(ClientMessage).validate_python(message)
+    validate(message, load_schema("protocol.schema.json"))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {
+            "type": "CHAT_MESSAGE",
+            "version": 1,
+            "requestId": "chat-1",
+            "text": "x" * 281,
+        },
+        {
+            "type": "REACTION_SENT",
+            "version": 1,
+            "requestId": "reaction-1",
+            "reactionId": "not-a-reaction",
+        },
+        {
+            "type": "GIFT_SENT",
+            "version": 1,
+            "requestId": "gift-1",
+            "toPlayerId": "player-2",
+            "giftId": "not-a-gift",
+        },
+        {
+            "type": "GIFT_SENT",
+            "version": 1,
+            "requestId": "gift-1",
+            "toPlayerId": "",
+            "giftId": "rose",
+        },
+        {
+            "type": "SET_COSMETICS",
+            "version": 1,
+            "requestId": "cosmetics-1",
+            "diceSkinId": "not-a-skin",
+            "pieceSkinId": "classic",
+        },
+        {
+            "type": "REACTION_SENT",
+            "version": 1,
+            "requestId": "reaction-1",
+            "reactionId": "laugh",
+            "playerId": "forged-player",
+        },
+        {
+            "type": "CHAT_MESSAGE",
+            "version": 1,
+            "requestId": "x" * 65,
+            "text": "hello",
+        },
+    ],
+)
+def test_social_commands_reject_invalid_ids_limits_and_extra_fields(message):
+    with pytest.raises(PydanticValidationError):
+        TypeAdapter(ClientMessage).validate_python(message)
+    with pytest.raises(ValidationError):
+        validate(message, load_schema("protocol.schema.json"))
+
+
+@pytest.mark.parametrize(
+    "event_type,payload",
+    [
+        ("CHAT_HISTORY_SYNC", {"messages": []}),
+        (
+            "CHAT_MESSAGE",
+            {
+                "messageId": "message-1",
+                "playerId": "player-1",
+                "displayName": "Felipe",
+                "text": "¡Hola! 😂",
+                "sentAt": "2026-09-30T12:00:00Z",
+            },
+        ),
+        ("REACTION_SENT", {"playerId": "player-1", "reactionId": "laugh"}),
+        (
+            "GIFT_SENT",
+            {"fromPlayerId": "player-1", "toPlayerId": "player-2", "giftId": "rose"},
+        ),
+        (
+            "PLAYER_COSMETICS_UPDATED",
+            {"playerId": "player-1", "diceSkinId": "jade", "pieceSkinId": "glow"},
+        ),
+    ],
+)
+def test_social_server_events_validate_against_pydantic_and_json_schema(
+    event_type,
+    payload,
+):
+    event = make_event(event_type, "AB7K2", 3, payload)
+
+    TypeAdapter(ServerEvent).validate_python(event)
+    validate(event, load_schema("server-events.schema.json"))
+
+
+def test_chat_history_rejects_more_than_fifty_messages():
+    message = {
+        "messageId": "message-1",
+        "playerId": "player-1",
+        "displayName": "Felipe",
+        "text": "hello",
+        "sentAt": "2026-09-30T12:00:00Z",
+    }
+    event = make_event(
+        "CHAT_HISTORY_SYNC",
+        "AB7K2",
+        3,
+        {"messages": [{**message, "messageId": f"message-{index}"} for index in range(51)]},
+    )
+
+    with pytest.raises(PydanticValidationError):
+        TypeAdapter(ServerEvent).validate_python(event)
+    with pytest.raises(ValidationError):
+        validate(event, load_schema("server-events.schema.json"))
+
+
 @pytest.mark.parametrize("dice_indices", [[], [0, 0], [2], [0, 1, 0]])
 def test_move_piece_schema_rejects_invalid_dice_indices(dice_indices):
     message = {

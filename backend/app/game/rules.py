@@ -9,6 +9,7 @@ from app.game.models import (
     GameParticipant,
     GameState,
     GameTransition,
+    PlayerLastRoll,
     MoveOption,
     PendingBonus,
     PiecePosition,
@@ -72,6 +73,8 @@ class GameRules:
             winner_id=None,
             result=None,
             requires_split_plan=False,
+            turn_number=1,
+            last_rolls_by_player_id={},
         )
 
     def can_leave_home(self, steps: int) -> bool:
@@ -298,6 +301,10 @@ class GameRules:
         next_state.used_dice_indices = []
         next_state.turn_phase = "waiting_for_move"
         next_state.requires_split_plan = False
+        next_state.last_rolls_by_player_id[player_id] = PlayerLastRoll(
+            values=values,
+            turn_number=next_state.turn_number,
+        )
         next_state.available_moves = list(self.available_moves(next_state))
         events = [
             DomainEvent(
@@ -660,6 +667,7 @@ class GameRules:
             return events
 
         state.current_player_id = next_player_id
+        state.turn_number += 1
         state.turn_phase = "waiting_for_roll"
         state.dice_values = None
         state.used_dice_indices = []

@@ -6,7 +6,7 @@ import {
   gameSyncEvent,
   pieceMoveEvent,
 } from "@/test/game-fixtures";
-import { isServerEvent } from "@/types/protocol";
+import { isClientCommand, isServerEvent } from "@/types/protocol";
 
 describe("v1 server-event validation", () => {
   it("accepts practice mode and bot flags in the authoritative room snapshot", () => {
@@ -189,5 +189,150 @@ describe("v1 server-event validation", () => {
     expect(isServerEvent(event)).toBe(true);
     expect(isServerEvent(missingRequester)).toBe(false);
     expect(isServerEvent(invalidIntent)).toBe(false);
+  });
+});
+
+describe("v1 social protocol validation", () => {
+  const envelope = (type: string, payload: object) => ({
+    type,
+    version: 1,
+    roomCode: "AB7K2",
+    stateVersion: 8,
+    eventId: `evt-${type}`,
+    serverTime: "2026-09-29T12:00:00Z",
+    payload,
+  });
+
+  const chatMessage = {
+    messageId: "msg-1",
+    playerId: "p1",
+    displayName: "Felipe",
+    text: "Hola 👋",
+    sentAt: "2026-09-29T12:00:00Z",
+  };
+
+  it.each([
+    ["CHAT_HISTORY_SYNC", { messages: [chatMessage] }],
+    ["CHAT_MESSAGE", chatMessage],
+    ["REACTION_SENT", { playerId: "p1", reactionId: "laugh" }],
+    ["GIFT_SENT", { fromPlayerId: "p1", toPlayerId: "p2", giftId: "rose" }],
+    [
+      "PLAYER_COSMETICS_UPDATED",
+      { playerId: "p1", diceSkinId: "jade", pieceSkinId: "glow" },
+    ],
+  ] as const)("accepts the %s event", (type, payload) => {
+    expect(isServerEvent(envelope(type, payload))).toBe(true);
+  });
+
+  it("rejects malformed chat, social IDs, extra fields, and oversized history", () => {
+    expect(
+      isServerEvent(
+        envelope("CHAT_MESSAGE", { ...chatMessage, text: "x".repeat(281) }),
+      ),
+    ).toBe(false);
+    expect(
+      isServerEvent(
+        envelope("REACTION_SENT", { playerId: "p1", reactionId: "unknown" }),
+      ),
+    ).toBe(false);
+    expect(
+      isServerEvent(
+        envelope("GIFT_SENT", {
+          fromPlayerId: "p1",
+          toPlayerId: "p2",
+          giftId: "premium",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isServerEvent(
+        envelope("PLAYER_COSMETICS_UPDATED", {
+          playerId: "p1",
+          diceSkinId: "classic",
+          pieceSkinId: "glow",
+          price: 0,
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isServerEvent(
+        envelope("CHAT_HISTORY_SYNC", {
+          messages: Array.from({ length: 51 }, (_, index) => ({
+            ...chatMessage,
+            messageId: `msg-${index}`,
+          })),
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("validates the public cosmetic and last-roll snapshot fields", () => {
+    const game = gameStateFixture({
+      turnNumber: 9,
+      lastRollsByPlayerId: {
+        p1: { values: [6, 2], turnNumber: 9 },
+      },
+    });
+    const room = gameRoomFixture({
+      status: "playing",
+      gameState: game,
+      players: gameRoomFixture().players.map((player, index) =>
+        index === 0
+          ? {
+              ...player,
+              diceSkinId: "jade",
+              pieceSkinId: "glow",
+              lastReceivedGiftId: "rose",
+            }
+          : player,
+      ),
+    });
+
+    expect(isServerEvent(gameSyncEvent({ room }))).toBe(true);
+    expect(
+      isServerEvent({
+        ...gameSyncEvent({ room }),
+        payload: {
+          room: {
+            ...room,
+            players: room.players.map((player, index) =>
+              index === 0 ? { ...player, diceSkinId: "unlisted" } : player,
+            ),
+          },
+          game,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("validates all four social client commands and their closed IDs", () => {
+    const commands: unknown[] = [
+      { type: "CHAT_MESSAGE", version: 1, requestId: "chat-1", text: "Hola" },
+      { type: "REACTION_SENT", version: 1, requestId: "reaction-1", reactionId: "laugh" },
+      {
+        type: "GIFT_SENT",
+        version: 1,
+        requestId: "gift-1",
+        toPlayerId: "p2",
+        giftId: "rose",
+      },
+      {
+        type: "SET_COSMETICS",
+        version: 1,
+        requestId: "skin-1",
+        diceSkinId: "brass",
+        pieceSkinId: "porcelain",
+      },
+    ];
+    const invalidCommands: unknown[] = [
+      { ...commands[0] as object, text: "x".repeat(281) },
+      { ...commands[1] as object, reactionId: "unknown" },
+      { ...commands[2] as object, giftId: "premium" },
+      { ...commands[3] as object, diceSkinId: "paid" },
+      { ...commands[0] as object, senderId: "forged" },
+    ];
+
+    expect(commands.every(isClientCommand)).toBe(true);
+    expect(invalidCommands.every(isClientCommand)).toBe(false);
   });
 });

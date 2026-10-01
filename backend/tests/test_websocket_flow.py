@@ -243,6 +243,9 @@ def test_handshake_sends_authoritative_snapshot_with_host(client):
             "isReady": False,
             "isConnected": True,
             "reservationExpiresAt": None,
+            "diceSkinId": "classic",
+            "pieceSkinId": "classic",
+            "lastReceivedGiftId": None,
         }
     ]
     assert "playerToken" not in str(sync)
@@ -378,6 +381,11 @@ def test_four_player_room_full_flow_is_authoritative_for_every_socket(client):
                 reconnect_message(player["roomCode"], player["playerToken"])
             )
 
+        # Wait until the last handshake has published presence before sampling
+        # the version; otherwise the HTTP read can race the queued WebSockets.
+        for _ in credentials:
+            receive_until(sockets[0], "PLAYER_JOINED")
+
         expected_version = client.get(f"/api/rooms/{host['roomCode']}").json()[
             "stateVersion"
         ]
@@ -485,6 +493,8 @@ def test_gameplay_events_and_full_snapshots_match_for_every_socket(client):
                 reconnect_message(player["roomCode"], player["playerToken"])
             )
 
+        for _ in credentials:
+            receive_until(sockets[0], "PLAYER_JOINED")
         initial_version = client.get(f"/api/rooms/{host['roomCode']}").json()[
             "stateVersion"
         ]
@@ -596,6 +606,8 @@ def test_disconnected_current_player_takes_automatic_turn(client):
             websocket.send_json(
                 reconnect_message(player["roomCode"], player["playerToken"])
             )
+        for _ in credentials:
+            receive_until(sockets[0], "PLAYER_JOINED")
         version = client.get(f"/api/rooms/{host['roomCode']}").json()["stateVersion"]
         for websocket in sockets:
             receive_complete_snapshot(websocket, 4, version)
@@ -956,6 +968,7 @@ def test_concurrent_mutations_publish_versions_in_commit_order(client):
                 receive_until(first_socket, "GAME_STATE_SYNC")
                 receive_until(second_socket, "GAME_STATE_SYNC")
                 receive_until(observer_socket, "GAME_STATE_SYNC")
+                receive_until(observer_socket, "CHAT_HISTORY_SYNC")
 
                 first_socket.send_json(
                     {
@@ -1020,6 +1033,100 @@ def test_not_yet_supported_command_returns_error_without_mutating_state(client):
     assert error["payload"]["code"] == "INVALID_MESSAGE"
     assert error["requestId"] == "future-command"
     assert room["stateVersion"] == state_version
+
+
+def test_reconnect_sends_snapshot_then_recent_chat_without_race(client):
+    created = client.post(
+        "/api/practice",
+        json={"displayName": "Host", "playerCount": 4, "color": "green"},
+    )
+    assert created.status_code == 201
+    host = created.json()
+    chat_command = {
+        "type": "CHAT_MESSAGE",
+        "version": 1,
+        "requestId": "reconnect-chat",
+        "text": "Nos vemos al volver",
+    }
+
+    with client.websocket_connect(host["wsPath"]) as first_socket:
+        first_socket.send_json(reconnect_message(host["roomCode"], host["playerToken"]))
+        receive_until(first_socket, "GAME_STATE_SYNC")
+        assert receive_until(first_socket, "CHAT_HISTORY_SYNC")["payload"]["messages"] == []
+        first_socket.send_json(chat_command)
+        sent = receive_until_request(first_socket, "CHAT_MESSAGE", "reconnect-chat")
+        assert sent["payload"]["text"] == "Nos vemos al volver"
+
+    with client.websocket_connect(host["wsPath"]) as resumed_socket:
+        resumed_socket.send_json(reconnect_message(host["roomCode"], host["playerToken"]))
+        reconnected = receive_until(resumed_socket, "PLAYER_RECONNECTED")
+        snapshot = receive_until(resumed_socket, "GAME_STATE_SYNC")
+        history = receive_until(resumed_socket, "CHAT_HISTORY_SYNC")
+
+    assert reconnected["payload"]["player"]["id"] == host["playerId"]
+    assert snapshot["stateVersion"] == history["stateVersion"]
+    assert history["payload"]["messages"] == [sent["payload"]]
+
+
+def test_social_commands_use_authenticated_identity_and_reject_invalid_targets_without_mutation(
+    client,
+):
+    created = client.post(
+        "/api/practice",
+        json={"displayName": "Host", "playerCount": 4, "color": "green"},
+    )
+    assert created.status_code == 201
+    host = created.json()
+
+    with client.websocket_connect(host["wsPath"]) as websocket:
+        websocket.send_json(reconnect_message(host["roomCode"], host["playerToken"]))
+        sync = receive_until(websocket, "GAME_STATE_SYNC")
+        receive_until(websocket, "CHAT_HISTORY_SYNC")
+        before_version = sync["stateVersion"]
+
+        websocket.send_json(
+            {
+                "type": "GIFT_SENT",
+                "version": 1,
+                "requestId": "spoofed-sender",
+                "fromPlayerId": "somebody-else",
+                "toPlayerId": sync["payload"]["room"]["players"][1]["id"],
+                "giftId": "rose",
+            }
+        )
+        spoof_error = receive_until_request(websocket, "ERROR", "spoofed-sender")
+
+        websocket.send_json(
+            {
+                "type": "GIFT_SENT",
+                "version": 1,
+                "requestId": "self-gift",
+                "toPlayerId": host["playerId"],
+                "giftId": "rose",
+            }
+        )
+        target_error = receive_until_request(websocket, "ERROR", "self-gift")
+
+        room_after_rejections = client.get(f"/api/rooms/{host['roomCode']}").json()
+        recipient_id = sync["payload"]["room"]["players"][1]["id"]
+        websocket.send_json(
+            {
+                "type": "GIFT_SENT",
+                "version": 1,
+                "requestId": "valid-gift",
+                "toPlayerId": recipient_id,
+                "giftId": "rose",
+            }
+        )
+        gift = receive_until_request(websocket, "GIFT_SENT", "valid-gift")
+        gift_sync = receive_until(websocket, "GAME_STATE_SYNC")
+
+    assert spoof_error["payload"]["code"] == "INVALID_MESSAGE"
+    assert target_error["payload"]["code"] == "INVALID_GIFT_TARGET"
+    assert room_after_rejections["stateVersion"] == before_version
+    assert gift["payload"]["fromPlayerId"] == host["playerId"]
+    assert gift["payload"]["toPlayerId"] == recipient_id
+    assert gift_sync["payload"]["room"]["players"][1]["lastReceivedGiftId"] == "rose"
 
 
 def test_repeated_request_id_rebroadcasts_cached_change_without_new_version(client):

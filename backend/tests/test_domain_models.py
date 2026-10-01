@@ -55,6 +55,8 @@ def test_game_domain_models_represent_piece_locations_and_initial_turn():
         "finished",
     ]
     assert game.turn_phase == "waiting_for_roll"
+    assert getattr(game, "turn_number", None) == 1
+    assert getattr(game, "last_rolls_by_player_id", None) == {}
 
 
 def test_default_game_rules_config_matches_the_approved_variant():

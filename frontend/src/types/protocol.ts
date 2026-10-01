@@ -1,11 +1,17 @@
 import type {
+  ChatMessage,
   DiceIndex,
+  DiceSkinId,
   GameResult,
   GameState,
+  GiftId,
   MoveOption,
+  PieceSkinId,
   PiecePosition,
+  PlayerLastRoll,
   PublicPlayer,
   PublicRoomState,
+  ReactionId,
 } from "./game";
 
 export type ClientCommand =
@@ -25,9 +31,30 @@ export type ClientCommand =
       version: 1;
       requestId: string;
       pieceId: string;
-    }
+  }
   | { type: "RETURN_TO_LOBBY"; version: 1; requestId: string }
-  | { type: "PLAY_AGAIN"; version: 1; requestId: string };
+  | { type: "PLAY_AGAIN"; version: 1; requestId: string }
+  | { type: "CHAT_MESSAGE"; version: 1; requestId: string; text: string }
+  | {
+      type: "REACTION_SENT";
+      version: 1;
+      requestId: string;
+      reactionId: ReactionId;
+    }
+  | {
+      type: "GIFT_SENT";
+      version: 1;
+      requestId: string;
+      toPlayerId: string;
+      giftId: GiftId;
+    }
+  | {
+      type: "SET_COSMETICS";
+      version: 1;
+      requestId: string;
+      diceSkinId: DiceSkinId;
+      pieceSkinId: PieceSkinId;
+    };
 
 export type ServerEventEnvelope<T extends string, P> = {
   type: T;
@@ -92,6 +119,17 @@ export type ServerEvent =
       "GAME_RESET",
       { status: "lobby"; requestedReplay: boolean; requesterId: string }
     >
+  | ServerEventEnvelope<"CHAT_HISTORY_SYNC", { messages: ChatMessage[] }>
+  | ServerEventEnvelope<"CHAT_MESSAGE", ChatMessage>
+  | ServerEventEnvelope<"REACTION_SENT", { playerId: string; reactionId: ReactionId }>
+  | ServerEventEnvelope<
+      "GIFT_SENT",
+      { fromPlayerId: string; toPlayerId: string; giftId: GiftId }
+    >
+  | ServerEventEnvelope<
+      "PLAYER_COSMETICS_UPDATED",
+      { playerId: string; diceSkinId: DiceSkinId; pieceSkinId: PieceSkinId }
+    >
   | ServerEventEnvelope<"ERROR", { code: string; message: string }>;
 
 export type PieceMoveEvent = Extract<ServerEvent, { type: "PIECE_MOVED" }>;
@@ -140,6 +178,41 @@ const isPlayerColor = (value: unknown): value is PublicPlayer["color"] =>
   value === "purple" ||
   value === "orange";
 
+const isDiceSkinId = (value: unknown): value is DiceSkinId =>
+  value === "classic" ||
+  value === "brass" ||
+  value === "jade" ||
+  value === "midnight";
+
+const isPieceSkinId = (value: unknown): value is PieceSkinId =>
+  value === "classic" ||
+  value === "porcelain" ||
+  value === "walnut" ||
+  value === "glow";
+
+const isGiftId = (value: unknown): value is GiftId =>
+  value === "rose" ||
+  value === "tomato" ||
+  value === "applause" ||
+  value === "confetti" ||
+  value === "heart" ||
+  value === "fire";
+
+const isReactionId = (value: unknown): value is ReactionId =>
+  value === "laugh" ||
+  value === "cry" ||
+  value === "angry" ||
+  value === "cool" ||
+  value === "shocked" ||
+  value === "heart" ||
+  value === "applause";
+
+const isWithinLength = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is string => isString(value, minimum) && value.length <= maximum;
+
 const isPublicPlayer = (value: unknown): value is PublicPlayer => {
   if (
     !isRecord(value) ||
@@ -153,6 +226,9 @@ const isPublicPlayer = (value: unknown): value is PublicPlayer => {
       "isReady",
       "isConnected",
       "reservationExpiresAt",
+      "diceSkinId",
+      "pieceSkinId",
+      "lastReceivedGiftId",
     ])
   ) {
     return false;
@@ -167,9 +243,30 @@ const isPublicPlayer = (value: unknown): value is PublicPlayer => {
     typeof value.isBot === "boolean" &&
     typeof value.isReady === "boolean" &&
     typeof value.isConnected === "boolean" &&
-    (value.reservationExpiresAt === null || isDateTime(value.reservationExpiresAt))
+    (value.reservationExpiresAt === null || isDateTime(value.reservationExpiresAt)) &&
+    isDiceSkinId(value.diceSkinId) &&
+    isPieceSkinId(value.pieceSkinId) &&
+    (value.lastReceivedGiftId === null || isGiftId(value.lastReceivedGiftId))
   );
 };
+
+const isPlayerLastRoll = (value: unknown): value is PlayerLastRoll =>
+  isRecord(value) &&
+  hasExactKeys(value, ["values", "turnNumber"]) &&
+  Array.isArray(value.values) &&
+  value.values.length === 2 &&
+  value.values.every((die) => isIntegerAtLeast(die, 1) && die <= 6) &&
+  isIntegerAtLeast(value.turnNumber, 1);
+
+const isLastRollsByPlayerId = (
+  value: unknown,
+): value is Record<string, PlayerLastRoll> =>
+  isRecord(value) &&
+  Object.keys(value).length <= 6 &&
+  Object.entries(value).every(
+    ([playerId, lastRoll]) =>
+      isWithinLength(playerId, 1, 64) && isPlayerLastRoll(lastRoll),
+  );
 
 const isPiecePosition = (value: unknown): value is PiecePosition => {
   if (
@@ -276,6 +373,8 @@ const isGameState = (value: unknown): value is GameState => {
       "winnerId",
       "result",
       "requiresSplitPlan",
+      "turnNumber",
+      "lastRollsByPlayerId",
     ])
   ) {
     return false;
@@ -329,7 +428,9 @@ const isGameState = (value: unknown): value is GameState => {
     value.finishOrder.every((id) => isString(id, 1)) &&
     (value.winnerId === null || isString(value.winnerId, 1)) &&
     (value.result === null || isGameResult(value.result)) &&
-    typeof value.requiresSplitPlan === "boolean"
+    typeof value.requiresSplitPlan === "boolean" &&
+    isIntegerAtLeast(value.turnNumber, 1) &&
+    isLastRollsByPlayerId(value.lastRollsByPlayerId)
   );
 };
 
@@ -408,6 +509,15 @@ const isPlacementArray = (value: unknown): boolean =>
       isIntegerAtLeast(placement.rank, 1) &&
       placement.rank <= 6,
   );
+
+const isChatMessage = (value: unknown): value is ChatMessage =>
+  isRecord(value) &&
+  hasExactKeys(value, ["messageId", "playerId", "displayName", "text", "sentAt"]) &&
+  isWithinLength(value.messageId, 1, 64) &&
+  isWithinLength(value.playerId, 1, 64) &&
+  isWithinLength(value.displayName, 1, 24) &&
+  isWithinLength(value.text, 1, 280) &&
+  isDateTime(value.sentAt);
 
 const isEventPayload = (type: unknown, payload: unknown): boolean => {
   if (!isRecord(payload)) return false;
@@ -512,11 +622,118 @@ const isEventPayload = (type: unknown, payload: unknown): boolean => {
         typeof payload.requestedReplay === "boolean" &&
         isString(payload.requesterId, 1)
       );
+    case "CHAT_HISTORY_SYNC":
+      return (
+        hasExactKeys(payload, ["messages"]) &&
+        Array.isArray(payload.messages) &&
+        payload.messages.length <= 50 &&
+        payload.messages.every(isChatMessage)
+      );
+    case "CHAT_MESSAGE":
+      return isChatMessage(payload);
+    case "REACTION_SENT":
+      return (
+        hasExactKeys(payload, ["playerId", "reactionId"]) &&
+        isWithinLength(payload.playerId, 1, 64) &&
+        isReactionId(payload.reactionId)
+      );
+    case "GIFT_SENT":
+      return (
+        hasExactKeys(payload, ["fromPlayerId", "toPlayerId", "giftId"]) &&
+        isWithinLength(payload.fromPlayerId, 1, 64) &&
+        isWithinLength(payload.toPlayerId, 1, 64) &&
+        isGiftId(payload.giftId)
+      );
+    case "PLAYER_COSMETICS_UPDATED":
+      return (
+        hasExactKeys(payload, ["playerId", "diceSkinId", "pieceSkinId"]) &&
+        isWithinLength(payload.playerId, 1, 64) &&
+        isDiceSkinId(payload.diceSkinId) &&
+        isPieceSkinId(payload.pieceSkinId)
+      );
     case "ERROR":
       return (
         hasExactKeys(payload, ["code", "message"]) &&
         isString(payload.code, 1) &&
         isString(payload.message)
+      );
+    default:
+      return false;
+  }
+};
+
+export const isClientCommand = (value: unknown): value is ClientCommand => {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    typeof value.type !== "string"
+  ) {
+    return false;
+  }
+
+  switch (value.type) {
+    case "RECONNECT":
+      return (
+        hasExactKeys(value, ["type", "version", "roomCode", "playerToken"]) &&
+        isRoomCode(value.roomCode) &&
+        isWithinLength(value.playerToken, 32, 256)
+      );
+    case "PLAYER_READY":
+      return (
+        hasExactKeys(value, ["type", "version", "ready", "requestId"]) &&
+        typeof value.ready === "boolean" &&
+        isWithinLength(value.requestId, 1, 64)
+      );
+    case "START_GAME":
+    case "ROLL_DICE":
+    case "RETURN_TO_LOBBY":
+    case "PLAY_AGAIN":
+      return (
+        hasExactKeys(value, ["type", "version", "requestId"]) &&
+        isWithinLength(value.requestId, 1, 64)
+      );
+    case "MOVE_PIECE":
+      return (
+        hasExactKeys(value, ["type", "version", "requestId", "pieceId", "diceIndices"]) &&
+        isWithinLength(value.requestId, 1, 64) &&
+        isWithinLength(value.pieceId, 1, 64) &&
+        Array.isArray(value.diceIndices) &&
+        value.diceIndices.length >= 1 &&
+        value.diceIndices.length <= 2 &&
+        value.diceIndices.every(isDiceIndex) &&
+        new Set(value.diceIndices).size === value.diceIndices.length
+      );
+    case "MOVE_BONUS_PIECE":
+      return (
+        hasExactKeys(value, ["type", "version", "requestId", "pieceId"]) &&
+        isWithinLength(value.requestId, 1, 64) &&
+        isWithinLength(value.pieceId, 1, 64)
+      );
+    case "CHAT_MESSAGE":
+      return (
+        hasExactKeys(value, ["type", "version", "requestId", "text"]) &&
+        isWithinLength(value.requestId, 1, 64) &&
+        isWithinLength(value.text, 1, 280)
+      );
+    case "REACTION_SENT":
+      return (
+        hasExactKeys(value, ["type", "version", "requestId", "reactionId"]) &&
+        isWithinLength(value.requestId, 1, 64) &&
+        isReactionId(value.reactionId)
+      );
+    case "GIFT_SENT":
+      return (
+        hasExactKeys(value, ["type", "version", "requestId", "toPlayerId", "giftId"]) &&
+        isWithinLength(value.requestId, 1, 64) &&
+        isWithinLength(value.toPlayerId, 1, 64) &&
+        isGiftId(value.giftId)
+      );
+    case "SET_COSMETICS":
+      return (
+        hasExactKeys(value, ["type", "version", "requestId", "diceSkinId", "pieceSkinId"]) &&
+        isWithinLength(value.requestId, 1, 64) &&
+        isDiceSkinId(value.diceSkinId) &&
+        isPieceSkinId(value.pieceSkinId)
       );
     default:
       return false;

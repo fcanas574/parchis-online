@@ -24,6 +24,8 @@ def test_new_game_creates_four_pieces_per_player_in_seat_order():
         ]
         assert state.current_player_id == "p1"
         assert state.turn_phase == "waiting_for_roll"
+        assert getattr(state, "turn_number", None) == 1
+        assert getattr(state, "last_rolls_by_player_id", None) == {}
 
 
 def test_roll_uses_injected_server_dice_and_returns_only_legal_options():
@@ -36,6 +38,43 @@ def test_roll_uses_injected_server_dice_and_returns_only_legal_options():
     assert transition.state.turn_phase == "waiting_for_move"
     assert all(option.steps in (2, 3, 5) for option in transition.state.available_moves)
     assert all(option.piece_id.startswith("p1-") for option in transition.state.available_moves)
+
+
+def test_roll_dice_records_latest_values_for_player_and_turn():
+    rules = GameRules(dice=SequenceDice([(2, 5)]))
+    state = rules.new_game("AB7K2", make_players(4))
+
+    transition = rules.roll_dice(state, "p1")
+    roll = getattr(transition.state, "last_rolls_by_player_id", {}).get("p1")
+    actual = None if roll is None else (roll.values, roll.turn_number)
+
+    assert actual == ((2, 5), 1)
+
+
+def test_each_player_keeps_own_last_roll_until_their_next_roll():
+    rules = GameRules(dice=SequenceDice([(2, 4), (4, 4)]))
+    state = rules.new_game("AB7K2", make_players(4))
+
+    after_first_roll = rules.roll_dice(state, "p1").state
+    after_second_roll = rules.roll_dice(after_first_roll, "p2").state
+    rolls = getattr(after_second_roll, "last_rolls_by_player_id", {})
+    actual = {
+        player_id: (roll.values, roll.turn_number)
+        for player_id, roll in rolls.items()
+    }
+
+    assert actual == {"p1": ((2, 4), 1), "p2": ((4, 4), 2)}
+
+
+def test_turn_number_advances_when_double_starts_extra_turn():
+    rules = GameRules(dice=SequenceDice([(4, 4)]))
+    state = rules.new_game("AB7K2", make_players(4))
+
+    transition = rules.roll_dice(state, "p1")
+
+    assert transition.state.current_player_id == "p1"
+    assert transition.state.turn_phase == "waiting_for_roll"
+    assert getattr(transition.state, "turn_number", None) == 2
 
 
 def test_first_die_options_preserve_a_complete_two_move_plan():

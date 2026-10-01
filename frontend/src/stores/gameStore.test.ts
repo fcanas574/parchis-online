@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ChatMessage } from "@/types/game";
 import type { ServerEvent } from "@/types/protocol";
 import {
   gameRoomFixture,
@@ -32,6 +33,137 @@ describe("game store", () => {
 
     expect(useGameStore.getState().room?.roomCode).toBe("AB7K2");
     expect(useGameStore.getState().lastStateVersion).toBe(2);
+  });
+
+  it("sync hydrates social state without replaying transient events", () => {
+    const game = gameStateFixture({
+      turnNumber: 9,
+      lastRollsByPlayerId: {
+        p1: { values: [6, 2], turnNumber: 9 },
+      },
+    });
+    const room = gameRoomFixture({
+      status: "playing",
+      gameState: game,
+      players: gameRoomFixture().players.map((player, index) =>
+        index === 0
+          ? {
+              ...player,
+              diceSkinId: "jade",
+              pieceSkinId: "glow",
+              lastReceivedGiftId: "rose",
+            }
+          : player,
+      ),
+    });
+
+    useGameStore.getState().applyEvent(gameSyncEvent({ room }));
+
+    expect(useGameStore.getState().room?.players[0]).toMatchObject({
+      diceSkinId: "jade",
+      pieceSkinId: "glow",
+      lastReceivedGiftId: "rose",
+    });
+    expect(useGameStore.getState().room?.gameState).toMatchObject({
+      turnNumber: 9,
+      lastRollsByPlayerId: { p1: { values: [6, 2], turnNumber: 9 } },
+    });
+    expect(useGameStore.getState().recentEvents).toEqual([]);
+  });
+
+  it("reconciles live chat with history by message ID and caps the list at 50", () => {
+    const message = (messageId: string, sentAt: string): ChatMessage => ({
+      messageId,
+      playerId: "p1",
+      displayName: "Felipe",
+      text: `mensaje ${messageId}`,
+      sentAt,
+    });
+    const staleMessage = message("stale", "2026-09-29T11:00:00Z");
+    const firstHistoryMessage = message("message-1", "2026-09-29T12:00:00Z");
+    const liveMessage = message("message-2", "2026-09-29T12:01:00Z");
+    const liveEvent: Extract<ServerEvent, { type: "CHAT_MESSAGE" }> = {
+      type: "CHAT_MESSAGE",
+      version: 1,
+      roomCode: "AB7K2",
+      stateVersion: 2,
+      eventId: "evt-live-chat",
+      serverTime: liveMessage.sentAt,
+      payload: liveMessage,
+    };
+    const historyEvent: Extract<ServerEvent, { type: "CHAT_HISTORY_SYNC" }> = {
+      type: "CHAT_HISTORY_SYNC",
+      version: 1,
+      roomCode: "AB7K2",
+      stateVersion: 2,
+      eventId: "evt-chat-history",
+      serverTime: liveMessage.sentAt,
+      payload: { messages: [firstHistoryMessage, liveMessage] },
+    };
+
+    useGameStore.getState().applyEvent({
+      ...liveEvent,
+      eventId: "evt-stale-chat",
+      payload: staleMessage,
+    });
+    useGameStore.getState().clearTransientEvents();
+    useGameStore.getState().applyEvent(liveEvent);
+    useGameStore.getState().applyEvent(historyEvent);
+    useGameStore.getState().applyEvent(liveEvent);
+
+    expect(useGameStore.getState().chatRoomCode).toBe("AB7K2");
+    expect(useGameStore.getState().chatHistoryReady).toBe(true);
+    expect(useGameStore.getState().chatMessages).toEqual([
+      firstHistoryMessage,
+      liveMessage,
+    ]);
+    expect(useGameStore.getState().recentEvents).toEqual([]);
+
+    const messages = Array.from({ length: 51 }, (_, index) =>
+      message(`history-${index}`, `2026-09-29T12:${String(index).padStart(2, "0")}:00Z`),
+    );
+    useGameStore.getState().clearTransientEvents();
+    expect(useGameStore.getState().chatHistoryReady).toBe(false);
+    useGameStore.getState().applyEvent({
+      ...historyEvent,
+      eventId: "evt-full-history",
+      payload: { messages },
+    });
+    expect(useGameStore.getState().chatMessages).toHaveLength(50);
+    expect(useGameStore.getState().chatMessages[0]?.messageId).toBe("history-1");
+  });
+
+  it("keeps the room identity attached to chat so another room never renders its history", () => {
+    const firstMessage: ChatMessage = {
+      messageId: "first-room-message",
+      playerId: "p1",
+      displayName: "Felipe",
+      text: "solo para esta sala",
+      sentAt: "2026-09-29T12:00:00Z",
+    };
+    const secondMessage: ChatMessage = {
+      ...firstMessage,
+      messageId: "second-room-message",
+      text: "otra sala",
+    };
+    const firstHistory: ServerEvent = {
+      type: "CHAT_HISTORY_SYNC", version: 1, roomCode: "AB7K2", stateVersion: 1,
+      eventId: "history-ab7k2", serverTime: firstMessage.sentAt, payload: { messages: [firstMessage] },
+    };
+    useGameStore.getState().applyEvent(firstHistory);
+
+    const nextRoom = gameRoomFixture({ roomCode: "CD9JK", stateVersion: 2 });
+    useGameStore.getState().applyEvent(gameSyncEvent({ room: nextRoom }));
+    expect(useGameStore.getState().room?.roomCode).toBe("CD9JK");
+    expect(useGameStore.getState().chatRoomCode).toBe("AB7K2");
+
+    const nextHistory: ServerEvent = {
+      type: "CHAT_HISTORY_SYNC", version: 1, roomCode: "CD9JK", stateVersion: 2,
+      eventId: "history-cd9jk", serverTime: secondMessage.sentAt, payload: { messages: [secondMessage] },
+    };
+    useGameStore.getState().applyEvent(nextHistory);
+    expect(useGameStore.getState().chatRoomCode).toBe("CD9JK");
+    expect(useGameStore.getState().chatMessages).toEqual([secondMessage]);
   });
 
   it("ignores an older state snapshot", () => {

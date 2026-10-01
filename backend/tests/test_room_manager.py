@@ -5,6 +5,7 @@ from itertools import count
 import pytest
 from pydantic import ValidationError
 
+from app.realtime.events import make_change_events
 from app.game.models import GameResult, PendingBonus, PlayerPlacement, SessionIdentity
 from app.game.rules import GameRules
 from app.repositories.memory_room_repository import MemoryRoomRepository
@@ -12,6 +13,19 @@ from app.repositories.room_repository import RoomCodeCollisionError
 from app.schemas.rooms import CreateRoomRequest, RoomCredentials
 from app.services.room_manager import RoomError, RoomManager, hash_player_token
 from game_support import create_ready_room, make_game_state
+
+
+async def social_action(manager, name, *args):
+    operation = getattr(manager, name, None)
+    assert callable(operation), f"RoomManager.{name} is not implemented"
+    return await operation(*args)
+
+
+async def start_social_game(manager):
+    credentials = await create_ready_room(manager, 4)
+    host = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+    await manager.start_game(host, "social-start")
+    return credentials
 
 
 def make_room_manager(clock, reservation_ttl_seconds=600):
@@ -669,10 +683,273 @@ async def test_public_room_has_only_v1_public_fields(room_manager):
         "isReady",
         "isConnected",
         "reservationExpiresAt",
+        "diceSkinId",
+        "pieceSkinId",
+        "lastReceivedGiftId",
     }
     assert public["mode"] == "friends"
     assert public["players"][0]["isBot"] is False
     assert "token" not in repr(public).casefold()
+
+
+@pytest.mark.asyncio
+async def test_public_player_defaults_to_classic_skins_and_no_received_gift(room_manager):
+    credentials = await room_manager.create_room("Host", 4, "green")
+
+    public = await room_manager.public_room(credentials.room_code)
+    player = public["players"][0]
+
+    assert player.get("diceSkinId") == "classic"
+    assert player.get("pieceSkinId") == "classic"
+    assert player.get("lastReceivedGiftId") is None
+    assert "tokenHash" not in player
+    assert "token" not in repr(public).casefold()
+
+
+@pytest.mark.asyncio
+async def test_chat_message_is_normalized_and_history_keeps_only_last_fifty(
+    room_manager,
+    clock,
+):
+    credentials = await start_social_game(room_manager)
+    sender = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+
+    for index in range(51):
+        if index > 0 and index % 5 == 0:
+            clock.advance(seconds=10)
+        await social_action(
+            room_manager,
+            "send_chat_message",
+            sender,
+            f"chat-{index}",
+            "  Hola\x00 👨‍👩‍👧‍👦\x7f \t",
+        )
+
+    history = await social_action(room_manager, "recent_chat_history", sender)
+
+    assert len(history) == 50
+    assert history[0]["text"] == "Hola 👨‍👩‍👧‍👦"
+    assert history[-1]["text"] == "Hola 👨‍👩‍👧‍👦"
+    assert len({message["messageId"] for message in history}) == 50
+
+
+@pytest.mark.asyncio
+async def test_chat_request_id_replay_returns_same_message_without_duplicate(room_manager):
+    credentials = await start_social_game(room_manager)
+    sender = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+
+    first = await social_action(
+        room_manager, "send_chat_message", sender, "same-request", "first"
+    )
+    replay = await social_action(
+        room_manager, "send_chat_message", sender, "same-request", "different"
+    )
+    history = await social_action(room_manager, "recent_chat_history", sender)
+
+    assert replay.payload["messageId"] == first.payload["messageId"]
+    assert replay.payload["text"] == "first"
+    assert [message["text"] for message in history] == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_social_chat_and_reactions_require_active_game_without_mutation(
+    room_manager,
+):
+    host = await room_manager.create_room("Host", 4, "green")
+    identity = SessionIdentity(host.room_code, host.player_id)
+    before = await room_manager.public_room(host.room_code)
+
+    for method, args in (
+        ("send_chat_message", (identity, "lobby-chat", "hello")),
+        ("send_reaction", (identity, "lobby-reaction", "laugh")),
+    ):
+        with pytest.raises(RoomError) as rejected:
+            await social_action(room_manager, method, *args)
+        assert rejected.value.code == "GAME_NOT_ACTIVE"
+
+    assert await room_manager.public_room(host.room_code) == before
+    assert getattr(await room_manager.get_room(host.room_code), "chat_messages", []) == []
+
+
+@pytest.mark.asyncio
+async def test_gift_updates_only_other_recipient_and_publishes_snapshot(room_manager):
+    credentials = await start_social_game(room_manager)
+    sender = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+    recipient_id = credentials[1].player_id
+
+    gift = await social_action(
+        room_manager, "send_gift", sender, "gift-1", recipient_id, "rose"
+    )
+    room = room_manager.public_room_from_state(gift.state)
+    events = make_change_events(gift, room)
+
+    assert gift.event_type == "GIFT_SENT"
+    assert gift.payload == {
+        "fromPlayerId": credentials[0].player_id,
+        "toPlayerId": recipient_id,
+        "giftId": "rose",
+    }
+    assert room["players"][1]["lastReceivedGiftId"] == "rose"
+    assert events[-1]["type"] == "GAME_STATE_SYNC"
+
+
+@pytest.mark.asyncio
+async def test_transient_chat_and_reaction_do_not_emit_game_state_sync(room_manager):
+    credentials = await start_social_game(room_manager)
+    sender = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+
+    chat = await social_action(
+        room_manager, "send_chat_message", sender, "chat-1", "hello"
+    )
+    reaction = await social_action(
+        room_manager, "send_reaction", sender, "reaction-1", "laugh"
+    )
+    chat_events = make_change_events(
+        chat, room_manager.public_room_from_state(chat.state)
+    )
+    reaction_events = make_change_events(
+        reaction, room_manager.public_room_from_state(reaction.state)
+    )
+
+    assert chat.include_state_sync is False
+    assert reaction.include_state_sync is False
+    assert [event["type"] for event in chat_events] == ["CHAT_MESSAGE"]
+    assert [event["type"] for event in reaction_events] == ["REACTION_SENT"]
+    assert chat.state.state_version == reaction.state.state_version
+
+
+@pytest.mark.asyncio
+async def test_social_commands_use_identity_and_reject_invalid_targets_without_mutation(
+    room_manager,
+):
+    credentials = await start_social_game(room_manager)
+    sender = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+    before = await room_manager.public_room(credentials[0].room_code)
+
+    for request_id, target_id, gift_id in (
+        ("self-gift", credentials[0].player_id, "rose"),
+        ("missing-player", "not-in-room", "rose"),
+        ("invalid-gift", credentials[1].player_id, "not-a-gift"),
+    ):
+        with pytest.raises(RoomError):
+            await social_action(
+                room_manager, "send_gift", sender, request_id, target_id, gift_id
+            )
+
+    with pytest.raises(RoomError):
+        await social_action(
+            room_manager, "send_reaction", sender, "invalid-reaction", "not-a-reaction"
+        )
+    with pytest.raises(RoomError):
+        await social_action(
+            room_manager,
+            "set_cosmetics",
+            sender,
+            "invalid-skin",
+            "not-a-skin",
+            "classic",
+        )
+
+    assert await room_manager.public_room(credentials[0].room_code) == before
+
+
+@pytest.mark.asyncio
+async def test_cosmetics_can_change_in_lobby_and_game_but_freeze_when_finished(
+    room_manager,
+    room_repository,
+):
+    credentials = await create_ready_room(room_manager, 4)
+    host = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+
+    lobby_change = await social_action(
+        room_manager, "set_cosmetics", host, "skin-lobby", "brass", "walnut"
+    )
+    assert lobby_change.state.players[0].dice_skin_id == "brass"
+    await room_manager.start_game(host, "social-start")
+    game_change = await social_action(
+        room_manager, "set_cosmetics", host, "skin-game", "midnight", "glow"
+    )
+    assert game_change.state.players[0].piece_skin_id == "glow"
+
+    finished = await room_manager.get_room(host.room_code)
+    finished.status = "finished"
+    assert finished.game_state is not None
+    finished.game_state.status = "finished"
+    await room_repository.save(finished)
+    before = await room_manager.public_room(host.room_code)
+    with pytest.raises(RoomError) as rejected:
+        await social_action(
+            room_manager, "set_cosmetics", host, "skin-finished", "jade", "porcelain"
+        )
+
+    assert rejected.value.code == "GAME_FINISHED"
+    assert await room_manager.public_room(host.room_code) == before
+
+
+@pytest.mark.asyncio
+async def test_chat_rate_limit_rejects_sixth_message_in_ten_seconds(room_manager):
+    credentials = await start_social_game(room_manager)
+    sender = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+    initial_version = (await room_manager.get_room(sender.room_code)).state_version
+
+    for index in range(5):
+        await social_action(
+            room_manager, "send_chat_message", sender, f"chat-{index}", f"message {index}"
+        )
+    with pytest.raises(RoomError) as rejected:
+        await social_action(
+            room_manager, "send_chat_message", sender, "chat-5", "too many"
+        )
+
+    room = await room_manager.get_room(sender.room_code)
+    assert rejected.value.code == "RATE_LIMITED"
+    assert len(room.chat_messages) == 5
+    assert room.state_version == initial_version
+
+
+@pytest.mark.asyncio
+async def test_reaction_rate_limit_rejects_ninth_reaction_in_five_seconds(room_manager):
+    credentials = await start_social_game(room_manager)
+    sender = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+    initial_version = (await room_manager.get_room(sender.room_code)).state_version
+
+    for index in range(8):
+        await social_action(
+            room_manager, "send_reaction", sender, f"reaction-{index}", "laugh"
+        )
+    with pytest.raises(RoomError) as rejected:
+        await social_action(
+            room_manager, "send_reaction", sender, "reaction-8", "laugh"
+        )
+
+    room = await room_manager.get_room(sender.room_code)
+    assert rejected.value.code == "RATE_LIMITED"
+    assert room.state_version == initial_version
+
+
+@pytest.mark.asyncio
+async def test_gift_rate_limit_rejects_fourth_gift_in_ten_seconds(room_manager):
+    credentials = await start_social_game(room_manager)
+    sender = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+    recipient_id = credentials[1].player_id
+
+    for index, gift_id in enumerate(("rose", "tomato", "applause")):
+        await social_action(
+            room_manager,
+            "send_gift",
+            sender,
+            f"gift-{index}",
+            recipient_id,
+            gift_id,
+        )
+    before = await room_manager.public_room(sender.room_code)
+    with pytest.raises(RoomError) as rejected:
+        await social_action(
+            room_manager, "send_gift", sender, "gift-3", recipient_id, "fire"
+        )
+
+    assert rejected.value.code == "RATE_LIMITED"
+    assert await room_manager.public_room(sender.room_code) == before
 
 
 @pytest.mark.asyncio

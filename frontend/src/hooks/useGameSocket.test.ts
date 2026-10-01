@@ -5,7 +5,10 @@ import {
   gameStateFixture,
   gameSyncEvent,
 } from "@/test/game-fixtures";
+import { PLAYER_PREFERENCES_STORAGE_KEY } from "@/lib/player-preferences";
+import { installBrowserStorageMock } from "@/test/storage";
 import { useGameStore } from "@/stores/gameStore";
+import type { ServerEvent } from "@/types/protocol";
 
 const { createRoomSocketMock } = vi.hoisted(() => {
   process.env.NEXT_PUBLIC_API_ORIGIN ??= "http://localhost:8000";
@@ -44,6 +47,7 @@ const snapshotEvent = gameSyncEvent({
 beforeEach(() => {
   useGameStore.getState().reset();
   createRoomSocketMock.mockReset();
+  installBrowserStorageMock();
 });
 
 const syncMessage = (overrides: Record<string, unknown> = {}) => ({
@@ -274,6 +278,169 @@ describe("WebSocket server-event validation", () => {
     );
 
     unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("sends social commands with fresh request IDs and the v1 protocol", () => {
+    const socket = createFakeSocket();
+    const randomUUID = vi
+      .fn()
+      .mockReturnValueOnce("req-chat")
+      .mockReturnValueOnce("req-reaction")
+      .mockReturnValueOnce("req-gift")
+      .mockReturnValueOnce("req-cosmetics");
+    vi.stubGlobal("crypto", { randomUUID });
+    createRoomSocketMock.mockReturnValue(socket as unknown as WebSocket);
+    useGameStore.getState().setSession({
+      roomCode: "AB7K2",
+      playerId: "p1",
+      playerToken: "player-token",
+      isHost: true,
+    });
+    const { result, unmount } = renderHook(() => useGameSocket("AB7K2"));
+
+    act(() => {
+      socket.readyState = WebSocket.OPEN;
+      socket.onopen?.(new Event("open"));
+      socket.onmessage?.({ data: JSON.stringify(snapshotEvent) } as MessageEvent);
+      expect(result.current.sendChatMessage("Hola 👋")).toBe(true);
+      expect(result.current.sendReaction("laugh")).toBe(true);
+      expect(result.current.sendGift("p2", "rose")).toBe(true);
+      expect(result.current.setCosmetics("jade", "glow")).toBe(true);
+    });
+
+    const commands = socket.send.mock.calls
+      .slice(1)
+      .map(([raw]) => JSON.parse(raw as string) as Record<string, unknown>);
+    expect(commands).toEqual([
+      { type: "CHAT_MESSAGE", version: 1, requestId: "req-chat", text: "Hola 👋" },
+      { type: "REACTION_SENT", version: 1, requestId: "req-reaction", reactionId: "laugh" },
+      {
+        type: "GIFT_SENT",
+        version: 1,
+        requestId: "req-gift",
+        toPlayerId: "p2",
+        giftId: "rose",
+      },
+      {
+        type: "SET_COSMETICS",
+        version: 1,
+        requestId: "req-cosmetics",
+        diceSkinId: "jade",
+        pieceSkinId: "glow",
+      },
+    ]);
+    unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("clears transient visual events when a reconnect opens a new socket", () => {
+    vi.useFakeTimers();
+    try {
+      const firstSocket = createFakeSocket();
+      const nextSocket = createFakeSocket();
+      createRoomSocketMock
+        .mockReturnValueOnce(firstSocket as unknown as WebSocket)
+        .mockReturnValueOnce(nextSocket as unknown as WebSocket);
+      useGameStore.getState().setSession({
+        roomCode: "AB7K2",
+        playerId: "p1",
+        playerToken: "player-token",
+        isHost: true,
+      });
+      const { unmount } = renderHook(() => useGameSocket("AB7K2"));
+      const reaction: Extract<ServerEvent, { type: "REACTION_SENT" }> = {
+        type: "REACTION_SENT",
+        version: 1,
+        roomCode: "AB7K2",
+        stateVersion: 4,
+        eventId: "evt-reaction",
+        serverTime: "2026-09-25T18:30:00Z",
+        payload: { playerId: "p2", reactionId: "laugh" },
+      };
+
+      act(() => {
+        firstSocket.readyState = WebSocket.OPEN;
+        firstSocket.onopen?.(new Event("open"));
+        firstSocket.onmessage?.({ data: JSON.stringify(snapshotEvent) } as MessageEvent);
+        firstSocket.onmessage?.({ data: JSON.stringify(reaction) } as MessageEvent);
+      });
+      expect(useGameStore.getState().recentEvents).toEqual([reaction]);
+
+      act(() => {
+        firstSocket.onclose?.(new CloseEvent("close"));
+        vi.advanceTimersByTime(500);
+      });
+
+      expect(useGameStore.getState().recentEvents).toEqual([]);
+      act(() => {
+        nextSocket.readyState = WebSocket.OPEN;
+        nextSocket.onopen?.(new Event("open"));
+        nextSocket.onmessage?.({ data: JSON.stringify(snapshotEvent) } as MessageEvent);
+      });
+      expect(useGameStore.getState().recentEvents).toEqual([]);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("publishes a divergent local skin once per connection after the authoritative snapshot", () => {
+    vi.useFakeTimers();
+    const randomUUID = vi.fn().mockReturnValue("req-cosmetics-sync");
+    vi.stubGlobal("crypto", { randomUUID });
+    window.localStorage.setItem(
+      PLAYER_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        preferences: {
+          diceSkinId: "jade",
+          pieceSkinId: "glow",
+          gameEffectsEnabled: true,
+          reactionSoundsEnabled: true,
+        },
+      }),
+    );
+    const firstSocket = createFakeSocket();
+    const nextSocket = createFakeSocket();
+    createRoomSocketMock
+      .mockReturnValueOnce(firstSocket as unknown as WebSocket)
+      .mockReturnValueOnce(nextSocket as unknown as WebSocket);
+    useGameStore.getState().setSession({
+      roomCode: "AB7K2",
+      playerId: "p1",
+      playerToken: "player-token",
+      isHost: true,
+    });
+    const { unmount } = renderHook(() => useGameSocket("AB7K2"));
+    const repeatedSnapshot = { ...snapshotEvent, eventId: "snapshot-again" };
+
+    act(() => {
+      firstSocket.readyState = WebSocket.OPEN;
+      firstSocket.onopen?.(new Event("open"));
+      firstSocket.onmessage?.({ data: JSON.stringify(snapshotEvent) } as MessageEvent);
+      firstSocket.onmessage?.({ data: JSON.stringify(repeatedSnapshot) } as MessageEvent);
+    });
+    expect(firstSocket.send.mock.calls.map(([raw]) => JSON.parse(raw as string).type)).toEqual([
+      "RECONNECT",
+      "SET_COSMETICS",
+    ]);
+
+    act(() => {
+      firstSocket.onclose?.(new CloseEvent("close"));
+      vi.advanceTimersByTime(500);
+      nextSocket.readyState = WebSocket.OPEN;
+      nextSocket.onopen?.(new Event("open"));
+      nextSocket.onmessage?.({ data: JSON.stringify(snapshotEvent) } as MessageEvent);
+    });
+
+    expect(nextSocket.send.mock.calls.map(([raw]) => JSON.parse(raw as string).type)).toEqual([
+      "RECONNECT",
+      "SET_COSMETICS",
+    ]);
+    expect(randomUUID).toHaveBeenCalledTimes(2);
+    unmount();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 

@@ -2,9 +2,16 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { readSession } from "@/lib/session";
+import { readPlayerPreferences } from "@/lib/player-preferences";
 import { createRoomSocket } from "@/lib/websocket";
 import { useGameStore } from "@/stores/gameStore";
-import type { DiceIndex } from "@/types/game";
+import type {
+  DiceIndex,
+  DiceSkinId,
+  GiftId,
+  PieceSkinId,
+  ReactionId,
+} from "@/types/game";
 import { isServerEvent, type ClientCommand, type ServerEvent } from "@/types/protocol";
 
 export { isServerEvent } from "@/types/protocol";
@@ -102,6 +109,52 @@ export function useGameSocket(roomCode: string) {
     [sendCommand],
   );
 
+  const sendChatMessage = useCallback(
+    (text: string) =>
+      sendCommand({
+        type: "CHAT_MESSAGE",
+        version: 1,
+        requestId: crypto.randomUUID(),
+        text,
+      }),
+    [sendCommand],
+  );
+
+  const sendReaction = useCallback(
+    (reactionId: ReactionId) =>
+      sendCommand({
+        type: "REACTION_SENT",
+        version: 1,
+        requestId: crypto.randomUUID(),
+        reactionId,
+      }),
+    [sendCommand],
+  );
+
+  const sendGift = useCallback(
+    (toPlayerId: string, giftId: GiftId) =>
+      sendCommand({
+        type: "GIFT_SENT",
+        version: 1,
+        requestId: crypto.randomUUID(),
+        toPlayerId,
+        giftId,
+      }),
+    [sendCommand],
+  );
+
+  const setCosmetics = useCallback(
+    (diceSkinId: DiceSkinId, pieceSkinId: PieceSkinId) =>
+      sendCommand({
+        type: "SET_COSMETICS",
+        version: 1,
+        requestId: crypto.randomUUID(),
+        diceSkinId,
+        pieceSkinId,
+      }),
+    [sendCommand],
+  );
+
   useEffect(() => {
     const activeSession =
       session?.roomCode === roomCode ? session : readSession(roomCode);
@@ -132,9 +185,11 @@ export function useGameSocket(roomCode: string) {
     const connect = () => {
       if (disposed || stopRetryingRef.current) return;
       clearRetryTimer();
+      store.clearTransientEvents();
       store.setConnectionState(retryAttemptRef.current === 0 ? "connecting" : "reconnecting");
 
       const socket = createRoomSocket(API_ORIGIN, roomCode);
+      let cosmeticsSyncSent = false;
       socketRef.current = socket;
       socket.onopen = () => {
         retryAttemptRef.current = 0;
@@ -162,6 +217,27 @@ export function useGameSocket(roomCode: string) {
           store.applyEvent(event);
           if (socketRef.current === socket && event.type === "GAME_STATE_SYNC") {
             store.setConnectionState("connected");
+            if (!cosmeticsSyncSent) {
+              cosmeticsSyncSent = true;
+              const localPlayer = event.payload.room.players.find(
+                (player) => player.id === activeSession.playerId,
+              );
+              const preferences = readPlayerPreferences();
+              if (
+                localPlayer &&
+                (localPlayer.diceSkinId !== preferences.diceSkinId ||
+                  localPlayer.pieceSkinId !== preferences.pieceSkinId) &&
+                socket.readyState === WebSocket.OPEN
+              ) {
+                socket.send(JSON.stringify({
+                  type: "SET_COSMETICS",
+                  version: 1,
+                  requestId: crypto.randomUUID(),
+                  diceSkinId: preferences.diceSkinId,
+                  pieceSkinId: preferences.pieceSkinId,
+                } satisfies ClientCommand));
+              }
+            }
           }
           if (isAuthenticationError(event)) {
             stopRetryingRef.current = true;
@@ -209,6 +285,10 @@ export function useGameSocket(roomCode: string) {
     sendMoveBonusPiece,
     sendReturnToLobby,
     sendPlayAgain,
+    sendChatMessage,
+    sendReaction,
+    sendGift,
+    setCosmetics,
   };
 }
 

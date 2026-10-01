@@ -77,13 +77,14 @@ def make_change_events(
             )
         )
 
-    events.append(
-        make_event(
-            "GAME_STATE_SYNC",
-            change.state.room_code,
-            change.state.state_version,
-            {"room": public_room, "game": game_state},
-            change.request_id,
+    if change.include_state_sync:
+        events.append(
+            make_event(
+                "GAME_STATE_SYNC",
+                change.state.room_code,
+                change.state.state_version,
+                {"room": public_room, "game": game_state},
+                change.request_id,
+            )
         )
-    )
     return tuple(events)

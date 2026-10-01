@@ -16,6 +16,30 @@ export type TurnPhase =
   | "finished";
 export type DiceIndex = 0 | 1;
 export type BonusReason = "capture" | "goal";
+export type DiceSkinId = "classic" | "brass" | "jade" | "midnight";
+export type PieceSkinId = "classic" | "porcelain" | "walnut" | "glow";
+export type GiftId = "rose" | "tomato" | "applause" | "confetti" | "heart" | "fire";
+export type ReactionId =
+  | "laugh"
+  | "cry"
+  | "angry"
+  | "cool"
+  | "shocked"
+  | "heart"
+  | "applause";
+
+export type PlayerLastRoll = {
+  values: [number, number];
+  turnNumber: number;
+};
+
+export type ChatMessage = {
+  messageId: string;
+  playerId: string;
+  displayName: string;
+  text: string;
+  sentAt: string;
+};
 
 export type PublicPlayer = {
   id: string;
@@ -27,6 +51,9 @@ export type PublicPlayer = {
   isReady: boolean;
   isConnected: boolean;
   reservationExpiresAt: string | null;
+  diceSkinId: DiceSkinId;
+  pieceSkinId: PieceSkinId;
+  lastReceivedGiftId: GiftId | null;
 };
 
 export type PiecePosition = {
@@ -89,6 +116,8 @@ export type GameState = {
   winnerId: string | null;
   result: GameResult | null;
   requiresSplitPlan: boolean;
+  turnNumber: number;
+  lastRollsByPlayerId: Record<string, PlayerLastRoll>;
 };
 
 export type PublicRoomState = {

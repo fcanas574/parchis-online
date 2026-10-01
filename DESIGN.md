@@ -112,7 +112,7 @@ A private table after sunset: deep violet felt, a dark walnut edge, warm parchme
 
 ### Product context and register
 
-- **Audience and primary job:** Friends creating or joining a private 4–6 person room, then confirming presence and readiness.
+- **Audience and primary job:** Friends creating or joining a private 4–6 person room, confirming presence, playing an authoritative match, and sharing lightweight social interactions.
 - **Target market(s) and evidence:** Spanish-language MVP with no market-specific commerce or regulated flow; grounded in `docs/superpowers/specs/2026-09-14-parchis-online-design.md`.
 - **Locale(s) and language policy:** Product-owned UI uses Spanish (`es`); server error codes and messages remain visible for actionable diagnostics.
 - **Usage scene:** Laptop, tablet, or phone during a social game session; low data density, frequent glanceable status changes.
@@ -132,7 +132,7 @@ Georgia gives the product name a familiar tabletop gravitas and is restricted to
 
 ## Layout
 
-The landing page pairs an editorial welcome area with one task card; the lobby uses a compact invitation header and a wrapping player-card grid, never a dashboard table. During play, the square board stays centered and dominant. Player identities sit in two compact perimeter rows; the active player's dice are embedded in that seat, never in a separate panel. On a typical phone viewport the complete turn, board, players, and dice fit without scrolling; short screens and enlarged text retain natural scrolling rather than clipping controls. Spacing follows the documented control/card/section values, and async text reserves a consistent status row so controls do not move.
+The landing page pairs an editorial welcome area with one task card; the lobby uses a compact invitation header and a wrapping player-card grid, never a dashboard table. During play, the square board stays centered and dominant. Player identities, their latest dice pair, and a small gift control sit together around the board; only the local active player's seat can roll. The chat opens as an overlay and stays folded by default, while quick reactions remain in a compact bar. At 390 × 844, the board, six seats, dice, and essential controls fit without document scrolling; shorter screens and enlarged text retain natural scrolling rather than clipping controls. Async notices stay visually quiet and do not reserve a visible turn-description panel.
 
 ## Elevation & Depth
 
@@ -144,7 +144,7 @@ Controls use `sm`, functional cards use `md`, and primary room surfaces use `lg`
 
 ## Game board
 
-The SVG board is the main surface of an active game. It follows the supplied traditional board geometry on a pale playing surface inside a narrow warm-wood frame. Four seats form a square cross; five and six seats form radial arms. Each arm has three columns and eight rows: the shared path travels inward along one flank, turns at the center, travels outward along the next flank, and crosses the outer tip. The center column is that player's seven-cell finish lane, ending at a matching triangular goal sector. The four- and six-seat homes are circular with a ring and small rosette; the five-seat reference uses four outlined piece positions. Visual labels are relative to the viewer: their own start is numbered 5 and their color arm points down, while logical cell indices remain unchanged. Each seat's goal entry is the numbered tip before its start. Colored starts carry a white arrow marker; normal safe cells are white with a colored star. The SVG scales as one square on phones, with every number drawn. Game rules keep logical indices authoritative; the board projection maps them to the photographed geometry. Finished pieces occupy stable slots in their owner's goal wedge. Legal pieces remain accessible buttons over the SVG, and motion follows server-confirmed state with reduced-motion support.
+The SVG board is the main surface of an active game. It follows the supplied traditional board geometry on a pale playing surface inside a narrow warm-wood frame. Four seats form a square cross; five and six seats form radial arms. Each arm has three columns and eight rows: the shared path travels inward along one flank, turns at the center, travels outward along the next flank, and crosses the outer tip. The center column is that player's seven-cell finish lane, ending at a matching triangular goal sector. The four- and six-seat homes are circular with a ring and small rosette; the five-seat reference uses four outlined piece positions. Visual labels are relative to the viewer: their own start is numbered 5 and their color arm points down, while logical cell indices remain unchanged. Each seat's goal entry is the numbered tip before their start. Colored starts carry a white arrow marker; normal safe cells are white with a colored star. The SVG scales as one square on phones, with every number drawn. Game rules keep logical indices authoritative; the board projection maps them to the photographed geometry. Finished pieces occupy stable slots in their owner's goal wedge. Legal pieces remain accessible buttons over the SVG, and motion follows server-confirmed state with reduced-motion support. Each player seat retains that player's latest server dice pair; a fresh `DICE_ROLLED` animates only its matching seat, while snapshots restore the pair without replaying motion.
 
 ## Components
 
@@ -158,11 +158,15 @@ Enabled controls have clear default, hover, active, and `focus-visible` treatmen
 
 ### Navigation and data display
 
-Navigation uses real links. Player data is a semantic list of cards sorted by server-provided `seatIndex`. Badges combine words and color. Room codes use utility type. Route titles follow `UX-CONTRACT.md`.
+Navigation uses real links. Lobby player data is a semantic list of cards ordered by server-provided `seatIndex`; the active game projects those same seats around the board relative to the local player's orientation. Badges combine words and color. Room codes use utility type. Route titles follow `UX-CONTRACT.md`.
 
 ### Forms and overlays
 
 Fields have persistent labels, `noValidate`, app-owned inline error status, and visible invalid state. Player count and color use native radio groups because the product accepts platform-owned radio interaction and requires no popup geometry. Clipboard feedback stays beside the copy action. Piece movement uses an in-stage non-modal chooser anchored above the selected piece only when there is more than one server-approved option; one option executes directly. Its `--z-popover` layer is `300`, scoped by the board stage, and never changes document flow. Active turn information remains on the player seat with a visually hidden live announcement, not a visible turn card.
+
+### Social controls and preferences
+
+The chat toggle opens a labeled overlay without reflowing the board; it starts closed. Reactions are one-tap controls with a brief event-driven animation. Each other player's gift icon opens the free catalog; a received gift flies from sender to recipient, then the latest gift replaces the recipient's neutral icon. Game effects and reaction sounds have independent local switches. Four dice finishes and four piece finishes are free, available immediately, and cosmetic only; there is no music, store, currency, unlock, or payment flow.
 
 ### Iconography
 
@@ -170,11 +174,11 @@ No icon library is required for Phase 1. Simple CSS dots and letter initials sup
 
 ### Motion
 
-The landing stage and newly synchronized lobby surface may fade/translate in over 220ms. Confirmed piece moves use a short, direct translation. Dice spin briefly on the server's DICE_ROLLED event and reveal its two authoritative values to everyone; controls use 120–160ms color/transform feedback. Reduced motion removes transforms, animation, and decorative drift while preserving immediate state changes.
+The landing stage and newly synchronized lobby surface may fade/translate in over 220ms. Confirmed piece moves use a short, direct translation. Dice spin briefly only on a fresh server `DICE_ROLLED` event and reveal its two authoritative values to everyone; gifts and reactions animate briefly without blocking play. Controls use 120–160ms color/transform feedback. Reduced motion removes transforms, animation, and decorative drift while preserving immediate state changes.
 
 ### Content and data visualization
 
-Voice is warm, direct Spanish: “Crear sala”, “Entrar a la sala”, “Estoy listo”. Status copy says what is happening and what the user can do next. Scores and placement appear only as game outcomes; chat, reactions, sounds, and gifts remain deferred from this gameplay phase.
+Voice is warm, direct Spanish: “Crear sala”, “Entrar a la sala”, “Estoy listo”. Status copy says what is happening and what the user can do next. Scores and placement appear only as game outcomes. Chat is short plain text with emoji; reactions and gifts remain lightweight, free, and optional.
 
 ## Do's and Don'ts
 

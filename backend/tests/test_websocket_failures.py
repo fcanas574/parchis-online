@@ -127,12 +127,14 @@ async def test_failed_send_reserves_player_and_publishes_once(
         ))
         await observer.event("PLAYER_JOINED")
         await observer.event("GAME_STATE_SYNC")
+        await observer.event("CHAT_HISTORY_SYNC")
         failed, failed_task = await stack.enter_async_context(connected_socket(
             guest, room_manager, connections, coordinator,
         ))
         for socket in (observer, failed):
             await socket.event("PLAYER_JOINED")
             await socket.event("GAME_STATE_SYNC")
+        await failed.event("CHAT_HISTORY_SYNC")
         before = await room_manager.get_room(host.room_code)
         failed.fail_on = failure_event
         failed.disconnect_exception = disconnect_exception
@@ -189,6 +191,7 @@ async def test_failed_send_reserves_player_and_publishes_once(
         restored = snapshot_player(
             await replacement.event("GAME_STATE_SYNC"), guest.player_id,
         )
+        await replacement.event("CHAT_HISTORY_SYNC")
         assert restored["isConnected"] is True
         assert restored["seatIndex"] == player["seatIndex"]
         assert restored["reservationExpiresAt"] is None
@@ -208,6 +211,7 @@ async def test_failed_initial_presence_send_disconnects_before_receive_loop(
     ) as (observer, _):
         await observer.event("PLAYER_JOINED")
         await observer.event("GAME_STATE_SYNC")
+        await observer.event("CHAT_HISTORY_SYNC")
         guest = await room_manager.join_room(host.room_code, "Guest", "red")
         async with connected_socket(
             guest, room_manager, connections, coordinator, fail_on=failure_event,
@@ -238,12 +242,14 @@ async def test_failed_replacement_sync_disconnects_once_despite_both_teardowns(
         ))
         await observer.event("PLAYER_JOINED")
         await observer.event("GAME_STATE_SYNC")
+        await observer.event("CHAT_HISTORY_SYNC")
         old, old_task = await stack.enter_async_context(connected_socket(
             guest, room_manager, connections, coordinator,
         ))
         for socket in (observer, old):
             await socket.event("PLAYER_JOINED")
             await socket.event("GAME_STATE_SYNC")
+        await old.event("CHAT_HISTORY_SYNC")
         before = await room_manager.get_room(host.room_code)
         failed, failed_task = await stack.enter_async_context(connected_socket(
             guest, room_manager, connections, coordinator,
@@ -295,6 +301,7 @@ async def test_cleanup_drains_multiple_failures_in_version_order(
             for recipient in sockets:
                 await recipient.event("PLAYER_JOINED")
                 await recipient.event("GAME_STATE_SYNC")
+            await socket.event("CHAT_HISTORY_SYNC")
         observer, failed_first, failed_second = sockets
         before = await room_manager.get_room(host.room_code)
         failed_first.fail_on = "PLAYER_READY" if trigger == "ready" else "ERROR"

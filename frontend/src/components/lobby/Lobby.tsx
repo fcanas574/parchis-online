@@ -7,6 +7,8 @@ import { Card } from "@/components/ui/card";
 import { PlayerList } from "./PlayerList";
 import { RoomInvite } from "./RoomInvite";
 import { cn } from "@/lib/utils";
+import { GameSettings } from "@/components/game/GameSettings";
+import { DEFAULT_PLAYER_PREFERENCES, type PlayerPreferences } from "@/lib/player-preferences";
 
 const connectionCopy: Record<ConnectionState, string> = {
   idle: "Preparando la sala…",
@@ -20,9 +22,13 @@ const connectionCopy: Record<ConnectionState, string> = {
 export function Lobby({
   roomCode,
   actions,
+  preferences = DEFAULT_PLAYER_PREFERENCES,
+  onPreferencesChange = () => undefined,
 }: {
   roomCode: string;
   actions: Pick<GameSocketActions, "sendReady" | "sendStartGame">;
+  preferences?: PlayerPreferences;
+  onPreferencesChange?: (preferences: PlayerPreferences) => void;
 }) {
   const room = useGameStore((state) => state.room);
   const session = useGameStore((state) => state.session);
@@ -96,6 +102,7 @@ export function Lobby({
             <h1>Sala {roomCode}</h1>
             <p>Que todos encuentren su asiento, marquen listo y empiece la partida.</p>
           </div>
+          <GameSettings preferences={preferences} onChange={onPreferencesChange} />
         </header>
         <RoomInvite roomCode={roomCode} />
         <PlayerList
