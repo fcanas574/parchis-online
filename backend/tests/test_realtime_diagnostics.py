@@ -3,12 +3,40 @@ import logging
 
 import pytest
 
+from app import main
 from app.game.models import SessionIdentity
 from app.realtime.connection_manager import (
     ClientConnection,
     ConnectionManager,
     RoomPublicationCoordinator,
 )
+
+
+def test_application_logging_makes_realtime_info_visible(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root_logger = logging.getLogger()
+    original_handlers = root_logger.handlers[:]
+    original_level = root_logger.level
+    try:
+        for handler in original_handlers:
+            root_logger.removeHandler(handler)
+        root_logger.setLevel(logging.WARNING)
+
+        configure = getattr(main, "configure_application_logging", None)
+        assert callable(configure), "application logging configuration is missing"
+        configure()
+        logging.getLogger("app.api.websocket").info("realtime-info-visible")
+
+        assert "realtime-info-visible" in capsys.readouterr().err
+    finally:
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+            if handler not in original_handlers:
+                handler.close()
+        for handler in original_handlers:
+            root_logger.addHandler(handler)
+        root_logger.setLevel(original_level)
 
 
 class RecordingSocket:
