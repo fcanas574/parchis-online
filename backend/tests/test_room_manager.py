@@ -1,6 +1,7 @@
 import asyncio
 import copy
 from itertools import count
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -19,6 +20,7 @@ from app.game.rules import GameRules
 from app.repositories.memory_room_repository import MemoryRoomRepository
 from app.repositories.room_repository import RoomCodeCollisionError
 from app.schemas.rooms import CreateRoomRequest, RoomCredentials
+import app.services.room_manager as room_manager_module
 from app.services.room_manager import RoomError, RoomManager, hash_player_token
 from game_support import create_ready_room, make_game_state
 
@@ -177,6 +179,33 @@ async def test_practice_bot_uses_only_offered_bonus_move(room_manager, room_repo
     assert change is not None
     assert change.event_type == "PIECE_MOVED"
     assert change.payload["pieceId"] in legal_piece_ids
+
+
+@pytest.mark.asyncio
+async def test_game_action_does_not_deepcopy_response_after_caching(
+    room_manager,
+    monkeypatch,
+):
+    credentials = await start_social_game(room_manager)
+    identity = SessionIdentity(credentials[0].room_code, credentials[0].player_id)
+    copied_changes = []
+    original_deepcopy = copy.deepcopy
+
+    def count_change_copies(value, memo=None):
+        if isinstance(value, RoomChange):
+            copied_changes.append(value)
+        return original_deepcopy(value, memo)
+
+    monkeypatch.setattr(
+        room_manager_module,
+        "copy",
+        SimpleNamespace(copy=copy.copy, deepcopy=count_change_copies),
+    )
+
+    change = await room_manager.roll_dice(identity, "roll-without-extra-copy")
+
+    assert change.event_type == "DICE_ROLLED"
+    assert len(copied_changes) == 1
 
 
 @pytest.mark.asyncio

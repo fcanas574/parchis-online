@@ -947,7 +947,11 @@ class RoomManager:
                 player_id=player.id,
             )
             await self._repository.save(room)
-            return copy.deepcopy(change)
+            # _apply_game_transition already builds a detached snapshot, and
+            # _cache_change stores its own copy. The command handler only reads
+            # this response, so another deep copy here duplicates every game
+            # action's most expensive work.
+            return change
 
     async def _reset_to_lobby(
         self,
