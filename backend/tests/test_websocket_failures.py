@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -11,9 +12,10 @@ from fastapi import WebSocket, WebSocketDisconnect
 from starlette.types import Message, Scope
 
 from app.api.websocket import room_websocket
-from app.game.models import RoomCredentialData
+from app.game.models import RoomCredentialData, SessionIdentity
 from app.realtime.connection_manager import ConnectionManager, RoomPublicationCoordinator
 from app.services.room_manager import RoomManager
+from game_support import create_ready_room
 
 
 @pytest.fixture
@@ -266,6 +268,75 @@ async def test_failed_replacement_sync_disconnects_once_despite_both_teardowns(
         after_teardown = await room_manager.get_room(host.room_code)
         assert after_teardown.state_version == sync["stateVersion"]
         assert observer.outgoing.empty()
+
+
+@pytest.mark.asyncio
+async def test_websocket_logs_connection_reconnect_and_close_code(
+    room_manager: RoomManager,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.api.websocket")
+    connections = ConnectionManager()
+    coordinator = RoomPublicationCoordinator()
+    host = await room_manager.create_room("Host", 4, "green")
+
+    async with connected_socket(host, room_manager, connections, coordinator) as (socket, _):
+        await socket.event("PLAYER_JOINED")
+        await socket.event("GAME_STATE_SYNC")
+        await socket.event("CHAT_HISTORY_SYNC")
+    async with connected_socket(host, room_manager, connections, coordinator) as (socket, _):
+        await socket.event("PLAYER_RECONNECTED")
+        await socket.event("GAME_STATE_SYNC")
+        await socket.event("CHAT_HISTORY_SYNC")
+
+    assert "realtime_ws_connected" in caplog.text
+    assert "reconnect=false" in caplog.text
+    assert "reconnect=true" in caplog.text
+    assert "realtime_ws_disconnected" in caplog.text
+    assert "close_code=1000" in caplog.text
+    assert "realtime_ws_closed" in caplog.text
+    assert "room_connections=1" in caplog.text
+    assert "managed_connections=1" in caplog.text
+    assert "managed_connections=0" in caplog.text
+    assert "room=AB7K2" not in caplog.text
+    assert host.player_id not in caplog.text
+    assert host.player_token not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_websocket_logs_command_lifecycle_without_chat_or_request_contents(
+    room_manager: RoomManager,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    connections = ConnectionManager()
+    coordinator = RoomPublicationCoordinator()
+    host = (await create_ready_room(room_manager, 4))[0]
+    await room_manager.start_game(
+        SessionIdentity(host.room_code, host.player_id),
+        "diagnostics-start",
+    )
+
+    async with connected_socket(host, room_manager, connections, coordinator) as (socket, _):
+        await socket.event("PLAYER_JOINED")
+        await socket.event("GAME_STATE_SYNC")
+        await socket.event("CHAT_HISTORY_SYNC")
+        socket.command({
+            "type": "CHAT_MESSAGE",
+            "version": 1,
+            "requestId": "private-request-id",
+            "text": "private chat contents must not be logged",
+        })
+        await socket.event("CHAT_MESSAGE")
+
+    assert "realtime_ws_command_received" in caplog.text
+    assert "realtime_ws_command_processed" in caplog.text
+    assert "command=CHAT_MESSAGE" in caplog.text
+    assert "outcome=accepted" in caplog.text
+    assert "private-request-id" not in caplog.text
+    assert "private chat contents must not be logged" not in caplog.text
+    assert "AB7K2" not in caplog.text
+    assert host.player_token not in caplog.text
 
 
 @pytest.mark.asyncio

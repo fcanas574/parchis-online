@@ -48,6 +48,7 @@ beforeEach(() => {
   useGameStore.getState().reset();
   createRoomSocketMock.mockReset();
   installBrowserStorageMock();
+  window.history.replaceState({}, "", "/");
 });
 
 const syncMessage = (overrides: Record<string, unknown> = {}) => ({
@@ -492,5 +493,106 @@ describe("WebSocket server-event validation", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("logs received events and last-event age only when realtime debugging is enabled", () => {
+    const socket = createFakeSocket();
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    createRoomSocketMock.mockReturnValue(socket as unknown as WebSocket);
+    useGameStore.getState().setSession({
+      roomCode: "AB7K2",
+      playerId: "p1",
+      playerToken: "player-token",
+      isHost: true,
+    });
+    window.history.replaceState({}, "", "/room/AB7K2?realtime-debug=1");
+
+    const { unmount } = renderHook(() => useGameSocket("AB7K2"));
+    act(() => {
+      socket.readyState = WebSocket.OPEN;
+      socket.onopen?.(new Event("open"));
+      socket.onmessage?.({ data: JSON.stringify(snapshotEvent) } as MessageEvent);
+      socket.onclose?.(new CloseEvent("close", { code: 1006, wasClean: false }));
+    });
+
+    expect(log).toHaveBeenCalledWith(
+      "[parchis-realtime]",
+      expect.objectContaining({
+        event: "server_event_received",
+        type: "GAME_STATE_SYNC",
+        stateVersion: 4,
+      }),
+    );
+    expect(log).toHaveBeenCalledWith(
+      "[parchis-realtime]",
+      expect.objectContaining({
+        event: "socket_closed",
+        code: 1006,
+        lastEventType: "GAME_STATE_SYNC",
+        lastStateVersion: 4,
+      }),
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain("player-token");
+    expect(JSON.stringify(log.mock.calls)).not.toContain("AB7K2");
+
+    unmount();
+    window.history.replaceState({}, "", "/");
+    log.mockRestore();
+  });
+
+  it("keeps realtime diagnostics silent unless explicitly enabled", () => {
+    const socket = createFakeSocket();
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    createRoomSocketMock.mockReturnValue(socket as unknown as WebSocket);
+    useGameStore.getState().setSession({
+      roomCode: "AB7K2",
+      playerId: "p1",
+      playerToken: "player-token",
+      isHost: true,
+    });
+
+    const { unmount } = renderHook(() => useGameSocket("AB7K2"));
+    act(() => {
+      socket.readyState = WebSocket.OPEN;
+      socket.onopen?.(new Event("open"));
+      socket.onmessage?.({ data: JSON.stringify(snapshotEvent) } as MessageEvent);
+      socket.onclose?.(new CloseEvent("close", { code: 1000, wasClean: true }));
+    });
+
+    expect(log).not.toHaveBeenCalled();
+    unmount();
+    log.mockRestore();
+  });
+
+  it("logs only the client command type, never its private payload", () => {
+    const socket = createFakeSocket();
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    createRoomSocketMock.mockReturnValue(socket as unknown as WebSocket);
+    useGameStore.getState().setSession({
+      roomCode: "AB7K2",
+      playerId: "p1",
+      playerToken: "player-token",
+      isHost: true,
+    });
+    window.history.replaceState({}, "", "/room/AB7K2?realtime-debug=1");
+
+    const { result, unmount } = renderHook(() => useGameSocket("AB7K2"));
+    act(() => {
+      socket.readyState = WebSocket.OPEN;
+      socket.onopen?.(new Event("open"));
+      result.current.sendChatMessage("secret chat text must not appear");
+    });
+
+    expect(log).toHaveBeenCalledWith(
+      "[parchis-realtime]",
+      expect.objectContaining({ event: "client_command_sent", type: "CHAT_MESSAGE" }),
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain("secret chat text must not appear");
+    expect(JSON.stringify(log.mock.calls)).not.toContain("player-token");
+    expect(JSON.stringify(log.mock.calls)).not.toContain("AB7K2");
+
+    unmount();
+    window.history.replaceState({}, "", "/");
+    log.mockRestore();
   });
 });

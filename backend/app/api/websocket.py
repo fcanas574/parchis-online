@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 from collections import deque
+from time import perf_counter
 from typing import Any
 from weakref import WeakKeyDictionary
 
@@ -15,6 +17,7 @@ from app.realtime.connection_manager import (
     ConnectionManager,
     RoomPublicationCoordinator,
 )
+from app.realtime.diagnostics import diagnostic_id
 from app.realtime.autopilot_runner import RoomAutopilotRunner
 from app.realtime.events import make_change_events, make_error_event, make_event
 from app.services.command_router import CommandContext, CommandRouter
@@ -22,12 +25,44 @@ from app.services.room_manager import RoomError, RoomManager
 
 
 router = APIRouter(prefix="/api/ws", tags=["websocket"])
+logger = logging.getLogger(__name__)
 
 _connection_manager = ConnectionManager()
 _publication_coordinator = RoomPublicationCoordinator()
 _autopilot_runners: WeakKeyDictionary[RoomManager, RoomAutopilotRunner] = (
     WeakKeyDictionary()
 )
+_DIAGNOSTIC_COMMAND_TYPES = frozenset({
+    "PLAYER_READY",
+    "START_GAME",
+    "ROLL_DICE",
+    "MOVE_PIECE",
+    "MOVE_BONUS_PIECE",
+    "RETURN_TO_LOBBY",
+    "PLAY_AGAIN",
+    "CHAT_MESSAGE",
+    "REACTION_SENT",
+    "GIFT_SENT",
+    "SET_COSMETICS",
+})
+
+
+def _diagnostic_command_name(message: object) -> str:
+    if not isinstance(message, dict):
+        return "UNKNOWN"
+    command_type = message.get("type")
+    if isinstance(command_type, str) and command_type in _DIAGNOSTIC_COMMAND_TYPES:
+        return command_type
+    return "UNKNOWN"
+
+
+def _diagnostic_request_id(message: object) -> str:
+    if not isinstance(message, dict):
+        return "none"
+    request_id = message.get("requestId")
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 64:
+        return "none"
+    return diagnostic_id(request_id)
 
 
 def _runner_for(room_manager: RoomManager) -> RoomAutopilotRunner:
@@ -105,10 +140,14 @@ async def room_websocket(
         get_publication_coordinator
     ),
 ) -> None:
+    connection_started_at = perf_counter()
+    close_code: int | None = None
     await websocket.accept()
     connection: ClientConnection | None = None
 
     async def send_handshake_error(error: RoomError) -> None:
+        nonlocal close_code
+        close_code = 1008
         await websocket.send_json(
             make_error_event(
                 room_code,
@@ -249,6 +288,10 @@ async def room_websocket(
                     "INVALID_MESSAGE",
                     "Reconnect room code does not match the WebSocket URL.",
                 )
+            logger.info(
+                "realtime_ws_handshake_received room_id=%s command=RECONNECT",
+                diagnostic_id(room_code),
+            )
         except InvalidWebSocketMessage as error:
             await send_handshake_error(RoomError("INVALID_MESSAGE", str(error)))
             return
@@ -264,6 +307,18 @@ async def room_websocket(
                 )
                 connection = ClientConnection(websocket, authenticated.identity)
                 replaced = await connection_manager.add(room_code, connection)
+                room_connections, managed_connections = (
+                    connection_manager.connection_counts(room_code)
+                )
+                logger.info(
+                    "realtime_ws_connected room_id=%s player_id=%s reconnect=%s "
+                    "room_connections=%d managed_connections=%d",
+                    diagnostic_id(room_code),
+                    diagnostic_id(authenticated.identity.player_id),
+                    str(authenticated.is_reconnect).lower(),
+                    room_connections,
+                    managed_connections,
+                )
 
                 state = await room_manager.get_room(room_code)
                 if replaced is not None and not authenticated.is_reconnect:
@@ -323,15 +378,79 @@ async def room_websocket(
             try:
                 message = await _receive_message(websocket)
             except InvalidWebSocketMessage as error:
+                logger.warning(
+                    "realtime_ws_invalid_message room_id=%s player_id=%s "
+                    "error_type=%s",
+                    diagnostic_id(room_code),
+                    diagnostic_id(connection.identity.player_id),
+                    type(error).__name__,
+                )
                 await send_connection_error(str(error))
                 continue
 
+            command_name = _diagnostic_command_name(message)
+            request_id = _diagnostic_request_id(message)
+            command_received_at = perf_counter()
+            logger.info(
+                "realtime_ws_command_received room_id=%s player_id=%s "
+                "command=%s request_id=%s",
+                diagnostic_id(room_code),
+                diagnostic_id(connection.identity.player_id),
+                command_name,
+                request_id,
+            )
             stop_stale_connection = False
             async with publication_coordinator.serialize(room_code):
                 if not await connection_manager.is_current(connection):
                     stop_stale_connection = True
+                    logger.info(
+                        "realtime_ws_command_ignored room_id=%s player_id=%s "
+                        "command=%s request_id=%s reason=stale_connection",
+                        diagnostic_id(room_code),
+                        diagnostic_id(connection.identity.player_id),
+                        command_name,
+                        request_id,
+                    )
                 else:
-                    changes = await command_router.handle(context, message)
+                    processing_started_at = perf_counter()
+                    try:
+                        changes = await command_router.handle(context, message)
+                    except Exception as error:
+                        logger.warning(
+                            "realtime_ws_command_failed room_id=%s player_id=%s "
+                            "command=%s request_id=%s duration_ms=%.2f "
+                            "error_type=%s",
+                            diagnostic_id(room_code),
+                            diagnostic_id(connection.identity.player_id),
+                            command_name,
+                            request_id,
+                            (perf_counter() - processing_started_at) * 1000,
+                            type(error).__name__,
+                        )
+                        raise
+                    outcome = (
+                        "rejected"
+                        if any(change.event_type == "ERROR" for change in changes)
+                        else "accepted"
+                    )
+                    change_types = ",".join(change.event_type for change in changes)
+                    final_version = (
+                        changes[-1].state.state_version if changes else "none"
+                    )
+                    logger.info(
+                        "realtime_ws_command_processed room_id=%s player_id=%s "
+                        "command=%s request_id=%s outcome=%s events=%s "
+                        "state_version=%s processing_ms=%.2f total_ms=%.2f",
+                        diagnostic_id(room_code),
+                        diagnostic_id(connection.identity.player_id),
+                        command_name,
+                        request_id,
+                        outcome,
+                        change_types or "none",
+                        final_version,
+                        (perf_counter() - processing_started_at) * 1000,
+                        (perf_counter() - command_received_at) * 1000,
+                    )
                     for change in changes:
                         if change.event_type == "ERROR":
                             await send_connection_event(
@@ -354,11 +473,42 @@ async def room_websocket(
                                 schedule_autopilot()
             if stop_stale_connection:
                 break
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as error:
+        close_code = error.code
+        room_connections, managed_connections = (
+            connection_manager.connection_counts(room_code)
+        )
+        logger.info(
+            "realtime_ws_disconnected room_id=%s player_id=%s close_code=%d "
+            "room_connections=%d managed_connections=%d",
+            diagnostic_id(room_code),
+            diagnostic_id(connection.identity.player_id)
+            if connection is not None
+            else "unknown",
+            error.code,
+            room_connections,
+            managed_connections,
+        )
     finally:
-        if connection is not None:
-            async with publication_coordinator.serialize(
-                connection.identity.room_code
-            ):
-                await disconnect_connections([connection])
+        try:
+            if connection is not None:
+                async with publication_coordinator.serialize(
+                    connection.identity.room_code
+                ):
+                    await disconnect_connections([connection])
+        finally:
+            room_connections, managed_connections = (
+                connection_manager.connection_counts(room_code)
+            )
+            logger.info(
+                "realtime_ws_closed room_id=%s player_id=%s close_code=%s "
+                "duration_ms=%.2f room_connections=%d managed_connections=%d",
+                diagnostic_id(room_code),
+                diagnostic_id(connection.identity.player_id)
+                if connection is not None
+                else "unknown",
+                close_code if close_code is not None else "unknown",
+                (perf_counter() - connection_started_at) * 1000,
+                room_connections,
+                managed_connections,
+            )

@@ -1,4 +1,6 @@
 import asyncio
+import logging
+from time import perf_counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -6,6 +8,10 @@ from dataclasses import dataclass
 from fastapi import WebSocket
 
 from app.game.models import SessionIdentity
+from app.realtime.diagnostics import diagnostic_id
+
+
+logger = logging.getLogger(__name__)
 
 
 REPLACED_CONNECTION_CLOSE_CODE = 4000
@@ -38,9 +44,28 @@ class RoomPublicationCoordinator:
             )
             entry.users += 1
 
+        waiting_started = perf_counter()
+        logger.info(
+            "realtime_room_lock_waiting room_id=%s queued=%d",
+            diagnostic_id(room_code),
+            max(entry.users - 1, 0),
+        )
         try:
             async with entry.lock:
-                yield
+                acquired_at = perf_counter()
+                logger.info(
+                    "realtime_room_lock_acquired room_id=%s wait_ms=%.2f",
+                    diagnostic_id(room_code),
+                    (acquired_at - waiting_started) * 1000,
+                )
+                try:
+                    yield
+                finally:
+                    logger.info(
+                        "realtime_room_lock_released room_id=%s hold_ms=%.2f",
+                        diagnostic_id(room_code),
+                        (perf_counter() - acquired_at) * 1000,
+                    )
         finally:
             async with self._guard:
                 entry.users -= 1
@@ -135,14 +160,71 @@ class ConnectionManager:
         event: dict[str, object],
     ) -> ClientConnection | None:
         """Report failure without consuming the lifecycle's removal claim."""
+        started_at = perf_counter()
+        event_type = event.get("type", "unknown")
+        state_version = event.get("stateVersion", "unknown")
+        raw_event_id = event.get("eventId")
+        raw_request_id = event.get("requestId")
+        event_id = (
+            diagnostic_id(raw_event_id)
+            if isinstance(raw_event_id, str)
+            else "none"
+        )
+        request_id = (
+            diagnostic_id(raw_request_id)
+            if isinstance(raw_request_id, str)
+            else "none"
+        )
+        room_id = diagnostic_id(connection.identity.room_code)
+        player_id = diagnostic_id(connection.identity.player_id)
+        logger.info(
+            "realtime_ws_send_started room_id=%s player_id=%s event=%s "
+            "state_version=%s event_id=%s request_id=%s",
+            room_id,
+            player_id,
+            event_type,
+            state_version,
+            event_id,
+            request_id,
+        )
         try:
             await connection.websocket.send_json(event)
-        except Exception:
+        except Exception as error:
+            logger.warning(
+                "realtime_ws_send_failed room_id=%s player_id=%s event=%s "
+                "state_version=%s event_id=%s request_id=%s duration_ms=%.2f "
+                "error_type=%s",
+                room_id,
+                player_id,
+                event_type,
+                state_version,
+                event_id,
+                request_id,
+                (perf_counter() - started_at) * 1000,
+                type(error).__name__,
+            )
             return connection
+        logger.info(
+            "realtime_ws_send_finished room_id=%s player_id=%s event=%s "
+            "state_version=%s event_id=%s request_id=%s duration_ms=%.2f",
+            room_id,
+            player_id,
+            event_type,
+            state_version,
+            event_id,
+            request_id,
+            (perf_counter() - started_at) * 1000,
+        )
         return None
 
     def connected_player_ids(self, room_code: str) -> set[str]:
         return set(self._connections.get(room_code, {}))
+
+    def connection_counts(self, room_code: str) -> tuple[int, int]:
+        """Return current room and process counts for registered WebSockets."""
+        room_count = len(self._connections.get(room_code, {}))
+        process_count = sum(len(players) for players in self._connections.values())
+        return room_count, process_count
 
     def _remove_locked(self, room_code: str, player_id: str) -> bool:
         room_connections = self._connections.get(room_code)

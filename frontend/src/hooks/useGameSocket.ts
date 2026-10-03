@@ -18,6 +18,27 @@ export { isServerEvent } from "@/types/protocol";
 
 const RETRY_DELAYS = [500, 1_000, 2_000, 4_000] as const;
 const API_ORIGIN = process.env.NEXT_PUBLIC_API_ORIGIN;
+type RealtimeDiagnosticDetails = Record<
+  string,
+  string | number | boolean | null
+>;
+
+function logRealtime(
+  event: string,
+  details: RealtimeDiagnosticDetails,
+): void {
+  if (
+    typeof window === "undefined" ||
+    new URLSearchParams(window.location.search).get("realtime-debug") !== "1"
+  ) {
+    return;
+  }
+  console.info("[parchis-realtime]", {
+    event,
+    at: new Date().toISOString(),
+    ...details,
+  });
+}
 
 const isAuthenticationError = (event: ServerEvent) =>
   event.type === "ERROR" && event.payload.code === "UNAUTHENTICATED";
@@ -30,8 +51,16 @@ export function useGameSocket(roomCode: string) {
   const session = useGameStore((state) => state.session);
 
   const sendCommand = useCallback((command: ClientCommand) => {
-    if (socketRef.current?.readyState !== WebSocket.OPEN) return false;
-    socketRef.current.send(JSON.stringify(command));
+    const socket = socketRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) {
+      logRealtime("client_command_not_sent", {
+        type: command.type,
+        reason: "socket_not_open",
+      });
+      return false;
+    }
+    socket.send(JSON.stringify(command));
+    logRealtime("client_command_sent", { type: command.type });
     return true;
   }, []);
 
@@ -160,6 +189,11 @@ export function useGameSocket(roomCode: string) {
       session?.roomCode === roomCode ? session : readSession(roomCode);
     const store = useGameStore.getState();
     let disposed = false;
+    let lastServerEvent: {
+      type: ServerEvent["type"];
+      stateVersion: number;
+      receivedAt: number;
+    } | null = null;
 
     if (!activeSession || !API_ORIGIN) {
       store.setConnectionState("disconnected");
@@ -179,6 +213,7 @@ export function useGameSocket(roomCode: string) {
       const delay = RETRY_DELAYS[retryAttemptRef.current] ?? 5_000;
       retryAttemptRef.current += 1;
       store.setConnectionState("reconnecting");
+      logRealtime("reconnect_scheduled", { attempt: retryAttemptRef.current, delayMs: delay });
       retryTimerRef.current = setTimeout(connect, delay);
     };
 
@@ -192,6 +227,8 @@ export function useGameSocket(roomCode: string) {
       let cosmeticsSyncSent = false;
       socketRef.current = socket;
       socket.onopen = () => {
+        const retryAttempt = retryAttemptRef.current;
+        logRealtime("socket_opened", { retryAttempt });
         retryAttemptRef.current = 0;
         socket.send(
           JSON.stringify({
@@ -201,6 +238,7 @@ export function useGameSocket(roomCode: string) {
             playerToken: activeSession.playerToken,
           } satisfies ClientCommand),
         );
+        logRealtime("reconnect_sent", { retryAttempt });
       };
       socket.onmessage = (message) => {
         if (typeof message.data !== "string") {
@@ -214,6 +252,20 @@ export function useGameSocket(roomCode: string) {
             socket.close(4002, "Invalid server event");
             return;
           }
+          const receivedAt = performance.now();
+          const gapMs = lastServerEvent
+            ? Math.round(receivedAt - lastServerEvent.receivedAt)
+            : null;
+          lastServerEvent = {
+            type: event.type,
+            stateVersion: event.stateVersion,
+            receivedAt,
+          };
+          logRealtime("server_event_received", {
+            type: event.type,
+            stateVersion: event.stateVersion,
+            gapMs,
+          });
           store.applyEvent(event);
           if (socketRef.current === socket && event.type === "GAME_STATE_SYNC") {
             store.setConnectionState("connected");
@@ -250,11 +302,27 @@ export function useGameSocket(roomCode: string) {
         }
       };
       socket.onerror = () => {
+        logRealtime("socket_error", {
+          lastEventType: lastServerEvent?.type ?? "none",
+          lastStateVersion: lastServerEvent?.stateVersion ?? -1,
+          msSinceLastEvent: lastServerEvent
+            ? Math.round(performance.now() - lastServerEvent.receivedAt)
+            : null,
+        });
         if (!disposed && !stopRetryingRef.current) {
           store.setConnectionState("error");
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        logRealtime("socket_closed", {
+          code: event.code,
+          wasClean: event.wasClean,
+          lastEventType: lastServerEvent?.type ?? "none",
+          lastStateVersion: lastServerEvent?.stateVersion ?? -1,
+          msSinceLastEvent: lastServerEvent
+            ? Math.round(performance.now() - lastServerEvent.receivedAt)
+            : null,
+        });
         if (socketRef.current === socket) socketRef.current = null;
         if (stopRetryingRef.current || disposed) return;
         store.setConnectionState("disconnected");
