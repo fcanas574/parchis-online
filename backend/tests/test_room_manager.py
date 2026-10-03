@@ -1,12 +1,20 @@
 import asyncio
 import copy
 from itertools import count
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
 from app.realtime.events import make_change_events
-from app.game.models import GameResult, PendingBonus, PlayerPlacement, SessionIdentity
+from app.game.models import (
+    GameResult,
+    PendingBonus,
+    PlayerPlacement,
+    RoomChange,
+    RoomState,
+    SessionIdentity,
+)
 from app.game.rules import GameRules
 from app.repositories.memory_room_repository import MemoryRoomRepository
 from app.repositories.room_repository import RoomCodeCollisionError
@@ -1079,6 +1087,28 @@ async def test_return_to_lobby_preserves_result_and_resets_readiness(
     assert change.state.game_state is None
     assert change.state.last_game_result is not None
     assert all(not player.is_ready for player in change.state.players)
+
+
+def test_snapshot_change_does_not_copy_processed_changes():
+    class CachedChangeMustNotBeCopied:
+        def __deepcopy__(self, memo):
+            raise AssertionError("idempotency cache should not be copied into a snapshot")
+
+    room = RoomState(
+        room_code="AB7K2",
+        max_players=4,
+        host_player_id="player-1",
+        players=[],
+    )
+    room.processed_changes[("player-1", "old-request")] = cast(
+        RoomChange,
+        CachedChangeMustNotBeCopied(),
+    )
+
+    change = RoomManager._snapshot_change(room, "DICE_ROLLED", {"value": 5})
+
+    assert not change.state.processed_changes
+    assert list(room.processed_changes) == [("player-1", "old-request")]
 
 
 @pytest.mark.asyncio

@@ -1245,8 +1245,11 @@ class RoomManager:
         additional_events: tuple[DomainEvent, ...] = (),
         include_state_sync: bool = True,
     ) -> RoomChange:
-        state_snapshot = copy.deepcopy(room)
-        state_snapshot.processed_changes.clear()
+        # Cached changes contain prior room snapshots. They are not part of the
+        # published state, and copying them makes each action slower over time.
+        state_without_cache = copy.copy(room)
+        state_without_cache.processed_changes = type(room.processed_changes)()
+        state_snapshot = copy.deepcopy(state_without_cache)
         return RoomChange(
             state=state_snapshot,
             event_type=event_type,
