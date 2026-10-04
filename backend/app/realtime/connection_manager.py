@@ -44,28 +44,32 @@ class RoomPublicationCoordinator:
             )
             entry.users += 1
 
-        waiting_started = perf_counter()
-        logger.info(
-            "realtime_room_lock_waiting room_id=%s queued=%d",
-            diagnostic_id(room_code),
-            max(entry.users - 1, 0),
-        )
+        trace_timing = logger.isEnabledFor(logging.DEBUG)
+        waiting_started = perf_counter() if trace_timing else 0.0
+        if trace_timing:
+            logger.debug(
+                "realtime_room_lock_waiting room_id=%s queued=%d",
+                diagnostic_id(room_code),
+                max(entry.users - 1, 0),
+            )
         try:
             async with entry.lock:
-                acquired_at = perf_counter()
-                logger.info(
-                    "realtime_room_lock_acquired room_id=%s wait_ms=%.2f",
-                    diagnostic_id(room_code),
-                    (acquired_at - waiting_started) * 1000,
-                )
+                acquired_at = perf_counter() if trace_timing else 0.0
+                if trace_timing:
+                    logger.debug(
+                        "realtime_room_lock_acquired room_id=%s wait_ms=%.2f",
+                        diagnostic_id(room_code),
+                        (acquired_at - waiting_started) * 1000,
+                    )
                 try:
                     yield
                 finally:
-                    logger.info(
-                        "realtime_room_lock_released room_id=%s hold_ms=%.2f",
-                        diagnostic_id(room_code),
-                        (perf_counter() - acquired_at) * 1000,
-                    )
+                    if trace_timing:
+                        logger.debug(
+                            "realtime_room_lock_released room_id=%s hold_ms=%.2f",
+                            diagnostic_id(room_code),
+                            (perf_counter() - acquired_at) * 1000,
+                        )
         finally:
             async with self._guard:
                 entry.users -= 1
@@ -163,33 +167,51 @@ class ConnectionManager:
         started_at = perf_counter()
         event_type = event.get("type", "unknown")
         state_version = event.get("stateVersion", "unknown")
-        raw_event_id = event.get("eventId")
-        raw_request_id = event.get("requestId")
-        event_id = (
-            diagnostic_id(raw_event_id)
-            if isinstance(raw_event_id, str)
-            else "none"
-        )
-        request_id = (
-            diagnostic_id(raw_request_id)
-            if isinstance(raw_request_id, str)
-            else "none"
-        )
-        room_id = diagnostic_id(connection.identity.room_code)
-        player_id = diagnostic_id(connection.identity.player_id)
-        logger.info(
-            "realtime_ws_send_started room_id=%s player_id=%s event=%s "
-            "state_version=%s event_id=%s request_id=%s",
-            room_id,
-            player_id,
-            event_type,
-            state_version,
-            event_id,
-            request_id,
-        )
+        trace_timing = logger.isEnabledFor(logging.DEBUG)
+        event_id = request_id = room_id = player_id = "none"
+        if trace_timing:
+            raw_event_id = event.get("eventId")
+            raw_request_id = event.get("requestId")
+            event_id = (
+                diagnostic_id(raw_event_id)
+                if isinstance(raw_event_id, str)
+                else "none"
+            )
+            request_id = (
+                diagnostic_id(raw_request_id)
+                if isinstance(raw_request_id, str)
+                else "none"
+            )
+            room_id = diagnostic_id(connection.identity.room_code)
+            player_id = diagnostic_id(connection.identity.player_id)
+            logger.debug(
+                "realtime_ws_send_started room_id=%s player_id=%s event=%s "
+                "state_version=%s event_id=%s request_id=%s",
+                room_id,
+                player_id,
+                event_type,
+                state_version,
+                event_id,
+                request_id,
+            )
         try:
             await connection.websocket.send_json(event)
         except Exception as error:
+            if not trace_timing:
+                room_id = diagnostic_id(connection.identity.room_code)
+                player_id = diagnostic_id(connection.identity.player_id)
+            raw_event_id = event.get("eventId")
+            raw_request_id = event.get("requestId")
+            event_id = (
+                diagnostic_id(raw_event_id)
+                if isinstance(raw_event_id, str)
+                else "none"
+            )
+            request_id = (
+                diagnostic_id(raw_request_id)
+                if isinstance(raw_request_id, str)
+                else "none"
+            )
             logger.warning(
                 "realtime_ws_send_failed room_id=%s player_id=%s event=%s "
                 "state_version=%s event_id=%s request_id=%s duration_ms=%.2f "
@@ -204,17 +226,18 @@ class ConnectionManager:
                 type(error).__name__,
             )
             return connection
-        logger.info(
-            "realtime_ws_send_finished room_id=%s player_id=%s event=%s "
-            "state_version=%s event_id=%s request_id=%s duration_ms=%.2f",
-            room_id,
-            player_id,
-            event_type,
-            state_version,
-            event_id,
-            request_id,
-            (perf_counter() - started_at) * 1000,
-        )
+        if trace_timing:
+            logger.debug(
+                "realtime_ws_send_finished room_id=%s player_id=%s event=%s "
+                "state_version=%s event_id=%s request_id=%s duration_ms=%.2f",
+                room_id,
+                player_id,
+                event_type,
+                state_version,
+                event_id,
+                request_id,
+                (perf_counter() - started_at) * 1000,
+            )
         return None
 
     def connected_player_ids(self, room_code: str) -> set[str]:

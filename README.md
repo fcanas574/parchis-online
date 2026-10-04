@@ -26,6 +26,8 @@ Si cambias los puertos, configura `NEXT_PUBLIC_API_ORIGIN` en `frontend/.env` pa
 
 El modo de práctica está habilitado por defecto para pruebas locales. Si despliegas la app públicamente y no quieres aceptar partidas automáticas, añade `PRACTICE_MODE_ENABLED=false` al `.env` del backend; `POST /api/practice` responderá `PRACTICE_DISABLED` sin crear salas. Ocultar la entrada de práctica en la web no constituye autenticación.
 
+Los logs detallados de cada envío y espera de WebSocket están desactivados por defecto para reducir trabajo por jugada. Si necesitas investigarlos temporalmente, configura `REALTIME_TRACE_LOGGING=true` en el backend y vuelve a `false` al terminar; los errores y la duración agregada de comandos siguen registrándose normalmente.
+
 ## Desarrollo
 
 Inicia cada proceso en una terminal distinta, desde la raíz del repositorio:

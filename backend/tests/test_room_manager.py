@@ -182,7 +182,7 @@ async def test_practice_bot_uses_only_offered_bonus_move(room_manager, room_repo
 
 
 @pytest.mark.asyncio
-async def test_game_action_does_not_deepcopy_response_after_caching(
+async def test_game_action_caches_response_without_copying_its_snapshot(
     room_manager,
     monkeypatch,
 ):
@@ -205,7 +205,7 @@ async def test_game_action_does_not_deepcopy_response_after_caching(
     change = await room_manager.roll_dice(identity, "roll-without-extra-copy")
 
     assert change.event_type == "DICE_ROLLED"
-    assert len(copied_changes) == 1
+    assert copied_changes == []
 
 
 @pytest.mark.asyncio

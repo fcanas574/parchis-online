@@ -12,6 +12,9 @@ def configure_application_logging() -> None:
         level=logging.INFO,
         format="%(levelname)s: %(name)s: %(message)s",
     )
+    logging.getLogger("app.realtime.connection_manager").setLevel(
+        logging.DEBUG if settings.realtime_trace_logging else logging.NOTSET
+    )
 
 
 configure_application_logging()

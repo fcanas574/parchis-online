@@ -4,6 +4,7 @@ import logging
 import pytest
 
 from app import main
+from app.config import settings
 from app.game.models import SessionIdentity
 from app.realtime.connection_manager import (
     ClientConnection,
@@ -39,6 +40,20 @@ def test_application_logging_makes_realtime_info_visible(
         root_logger.setLevel(original_level)
 
 
+def test_realtime_trace_logging_can_be_enabled_without_changing_default_info() -> None:
+    logger = logging.getLogger("app.realtime.connection_manager")
+    original_setting = settings.realtime_trace_logging
+    original_level = logger.level
+    try:
+        settings.realtime_trace_logging = True
+        main.configure_application_logging()
+        assert logger.isEnabledFor(logging.DEBUG)
+    finally:
+        settings.realtime_trace_logging = original_setting
+        main.configure_application_logging()
+        logger.setLevel(original_level)
+
+
 class RecordingSocket:
     async def send_json(self, event: dict[str, object]) -> None:
         await asyncio.sleep(0)
@@ -53,7 +68,7 @@ class FailingSocket:
 async def test_room_publication_logs_lock_wait_and_hold_without_raw_room_code(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO, logger="app.realtime.connection_manager")
+    caplog.set_level(logging.DEBUG, logger="app.realtime.connection_manager")
     coordinator = RoomPublicationCoordinator()
 
     async with coordinator.serialize("AB7K2"):
@@ -64,13 +79,18 @@ async def test_room_publication_logs_lock_wait_and_hold_without_raw_room_code(
     assert "wait_ms=" in caplog.text
     assert "hold_ms=" in caplog.text
     assert "AB7K2" not in caplog.text
+    assert all(
+        record.levelno == logging.DEBUG
+        for record in caplog.records
+        if record.name == "app.realtime.connection_manager"
+    )
 
 
 @pytest.mark.asyncio
 async def test_socket_send_logs_event_timing_without_raw_player_or_room_ids(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO, logger="app.realtime.connection_manager")
+    caplog.set_level(logging.DEBUG, logger="app.realtime.connection_manager")
     manager = ConnectionManager()
     connection = ClientConnection(
         RecordingSocket(),
@@ -93,6 +113,28 @@ async def test_socket_send_logs_event_timing_without_raw_player_or_room_ids(
     assert "duration_ms=" in caplog.text
     assert "private-player-id" not in caplog.text
     assert "AB7K2" not in caplog.text
+    assert all(
+        record.levelno == logging.DEBUG
+        for record in caplog.records
+        if record.name == "app.realtime.connection_manager"
+    )
+
+
+@pytest.mark.asyncio
+async def test_successful_socket_send_is_quiet_at_info_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.realtime.connection_manager")
+    manager = ConnectionManager()
+    connection = ClientConnection(
+        RecordingSocket(),
+        SessionIdentity(room_code="AB7K2", player_id="p1"),
+    )
+
+    await manager.send(connection, {"type": "GAME_STATE_SYNC"})
+
+    assert "realtime_ws_send_started" not in caplog.text
+    assert "realtime_ws_send_finished" not in caplog.text
 
 
 @pytest.mark.asyncio

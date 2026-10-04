@@ -1279,7 +1279,10 @@ class RoomManager:
         request_id: str,
         change: RoomChange,
     ) -> None:
-        room.processed_changes[(player_id, request_id)] = copy.deepcopy(change)
+        # `change` is already detached from the live room. Command and
+        # broadcast paths treat it as read-only; replay deep-copies it in
+        # `_cached_change` before returning the cached response.
+        room.processed_changes[(player_id, request_id)] = change
         while len(room.processed_changes) > MAX_PROCESSED_CHANGES:
             room.processed_changes.popitem(last=False)
 

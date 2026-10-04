@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     max_websocket_message_bytes: int = 16384
     room_requests_per_minute: int = 20
     practice_mode_enabled: bool = True
+    realtime_trace_logging: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
