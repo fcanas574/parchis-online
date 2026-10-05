@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from uuid import uuid4
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.realtime.connection_manager import (
     ConnectionManager,
     RoomPublicationCoordinator,
 )
+from app.realtime.diagnostics import diagnostic_request_id
 
 
 def test_application_logging_makes_realtime_info_visible(
@@ -155,3 +157,19 @@ async def test_failed_socket_send_logs_failure_without_exception_contents(
     assert "error_type=RuntimeError" in caplog.text
     assert "injected send failure" not in caplog.text
     assert "AB7K2" not in caplog.text
+
+
+def test_diagnostic_request_id_preserves_generated_uuid_for_cross_component_tracing():
+    request_id = str(uuid4())
+
+    assert diagnostic_request_id(request_id) == request_id
+
+
+def test_diagnostic_request_id_pseudonymizes_non_uuid_client_input():
+    request_id = "spoofed\nrequest-id"
+
+    result = diagnostic_request_id(request_id)
+
+    assert result != request_id
+    assert len(result) == 12
+    assert "\n" not in result

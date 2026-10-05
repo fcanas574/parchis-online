@@ -169,33 +169,38 @@ describe("piece presentation state", () => {
     expect(state.visualPositions["p1-piece-1"]).toEqual(track(30));
   });
 
-  it("clears pending animation and snaps to the synced game on reconnection", () => {
+  it("does not invalidate piece animation when another player reconnects", () => {
     let state = createPiecePresentation(
       gameAt({ "p1-piece-1": track(10) }),
       "AB7K2",
       2,
     );
-    state = receivePresentationEvent(
-      state,
-      pieceMoveEvent({ stateVersion: 3, eventId: "before-reconnect" }),
-    );
-    const authoritative = gameAt({ "p1-piece-1": track(11) });
-    state = receivePresentationEvent(state, syncEvent(authoritative, 3));
     const reconnect: ServerEvent = {
       type: "PLAYER_RECONNECTED",
       version: 1,
       roomCode: "AB7K2",
-      stateVersion: 4,
-      eventId: "reconnect-4",
+      stateVersion: 3,
+      eventId: "reconnect-3",
       serverTime: "2026-09-26T18:30:00Z",
       payload: { player: gameRoomFixture().players[0]! },
     };
 
     state = receivePresentationEvent(state, reconnect);
+    state = receivePresentationEvent(
+      state,
+      pieceMoveEvent({
+        stateVersion: 4,
+        eventId: "move-after-reconnect",
+        from: track(10),
+        to: track(11),
+        path: [track(11)],
+      }),
+    );
 
-    expect(state.queue).toHaveLength(0);
-    expect(state.visualPositions["p1-piece-1"]).toEqual(track(11));
-    expect(state.needsSync).toBe(true);
+    expect(state.lastVersion).toBe(4);
+    expect(state.queue).toHaveLength(1);
+    expect(state.visualPositions["p1-piece-1"]).toEqual(track(10));
+    expect(state.needsSync).toBe(false);
   });
 
   it("keeps a captured piece in place until the attacker arrives, then shows the impact before returning it home", () => {

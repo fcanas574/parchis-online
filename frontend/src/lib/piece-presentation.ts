@@ -245,10 +245,7 @@ export function receivePresentationEvent(
     return {
       ...state,
       lastVersion: event.stateVersion,
-      visualPositions: { ...state.authoritativePositions },
-      queue: [],
       seenEventIds: remember(state, event.eventId),
-      needsSync: true,
     };
   }
   if (state.needsSync) return state;

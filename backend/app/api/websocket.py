@@ -17,7 +17,7 @@ from app.realtime.connection_manager import (
     ConnectionManager,
     RoomPublicationCoordinator,
 )
-from app.realtime.diagnostics import diagnostic_id
+from app.realtime.diagnostics import diagnostic_id, diagnostic_request_id
 from app.realtime.autopilot_runner import RoomAutopilotRunner
 from app.realtime.events import make_change_events, make_error_event, make_event
 from app.services.command_router import CommandContext, CommandRouter
@@ -62,7 +62,7 @@ def _diagnostic_request_id(message: object) -> str:
     request_id = message.get("requestId")
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 64:
         return "none"
-    return diagnostic_id(request_id)
+    return diagnostic_request_id(request_id)
 
 
 def _runner_for(room_manager: RoomManager) -> RoomAutopilotRunner:
@@ -200,12 +200,32 @@ async def room_websocket(
 
     async def broadcast_change(change: RoomChange) -> list[ClientConnection]:
         # Finish the complete versioned batch before publishing any disconnects.
+        started_at = perf_counter()
         failed: list[ClientConnection] = []
         public_room = room_manager.public_room_from_state(change.state)
-        for event in make_change_events(change, public_room):
+        events = make_change_events(change, public_room)
+        recipients, _ = connection_manager.connection_counts(change.state.room_code)
+        for event in events:
             failed.extend(
                 await connection_manager.broadcast(change.state.room_code, event)
             )
+        failed_player_ids = {target.identity.player_id for target in failed}
+        logger.info(
+            "realtime_ws_broadcast_completed room_id=%s request_id=%s "
+            "state_version=%d events=%s event_count=%d recipients=%d "
+            "send_attempts=%d failed_connections=%d send_ms=%.2f",
+            diagnostic_id(change.state.room_code),
+            diagnostic_request_id(change.request_id)
+            if change.request_id is not None
+            else "none",
+            change.state.state_version,
+            ",".join(str(event["type"]) for event in events) or "none",
+            len(events),
+            recipients,
+            len(events) * recipients,
+            len(failed_player_ids),
+            (perf_counter() - started_at) * 1000,
+        )
         return failed
 
     async def disconnect_connections(targets: list[ClientConnection]) -> None:
@@ -400,7 +420,10 @@ async def room_websocket(
                 request_id,
             )
             stop_stale_connection = False
+            lock_wait_started_at = perf_counter()
             async with publication_coordinator.serialize(room_code):
+                lock_acquired_at = perf_counter()
+                lock_wait_ms = (lock_acquired_at - lock_wait_started_at) * 1000
                 if not await connection_manager.is_current(connection):
                     stop_stale_connection = True
                     logger.info(
@@ -437,20 +460,8 @@ async def room_websocket(
                     final_version = (
                         changes[-1].state.state_version if changes else "none"
                     )
-                    logger.info(
-                        "realtime_ws_command_processed room_id=%s player_id=%s "
-                        "command=%s request_id=%s outcome=%s events=%s "
-                        "state_version=%s processing_ms=%.2f total_ms=%.2f",
-                        diagnostic_id(room_code),
-                        diagnostic_id(connection.identity.player_id),
-                        command_name,
-                        request_id,
-                        outcome,
-                        change_types or "none",
-                        final_version,
-                        (perf_counter() - processing_started_at) * 1000,
-                        (perf_counter() - command_received_at) * 1000,
-                    )
+                    processing_ms = (perf_counter() - processing_started_at) * 1000
+                    publication_started_at = perf_counter()
                     for change in changes:
                         if change.event_type == "ERROR":
                             await send_connection_event(
@@ -471,6 +482,24 @@ async def room_websocket(
                                 and change.event_type != "GAME_STARTED"
                             ):
                                 schedule_autopilot()
+                    publication_ms = (perf_counter() - publication_started_at) * 1000
+                    logger.info(
+                        "realtime_ws_command_processed room_id=%s player_id=%s "
+                        "command=%s request_id=%s outcome=%s events=%s "
+                        "state_version=%s lock_wait_ms=%.2f processing_ms=%.2f "
+                        "publication_ms=%.2f total_ms=%.2f",
+                        diagnostic_id(room_code),
+                        diagnostic_id(connection.identity.player_id),
+                        command_name,
+                        request_id,
+                        outcome,
+                        change_types or "none",
+                        final_version,
+                        lock_wait_ms,
+                        processing_ms,
+                        publication_ms,
+                        (perf_counter() - command_received_at) * 1000,
+                    )
             if stop_stale_connection:
                 break
     except WebSocketDisconnect as error:

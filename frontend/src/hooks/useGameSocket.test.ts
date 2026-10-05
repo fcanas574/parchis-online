@@ -56,6 +56,11 @@ const syncMessage = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const realtimeEntries = (calls: readonly unknown[][]) =>
+  calls
+    .filter(([prefix]) => prefix === "[parchis-realtime]")
+    .map(([, serialized]) => JSON.parse(serialized as string) as Record<string, unknown>);
+
 describe("WebSocket server-event validation", () => {
   it("rejects a snapshot whose room identity or version disagrees with its envelope", () => {
     expect(
@@ -515,23 +520,19 @@ describe("WebSocket server-event validation", () => {
       socket.onclose?.(new CloseEvent("close", { code: 1006, wasClean: false }));
     });
 
-    expect(log).toHaveBeenCalledWith(
-      "[parchis-realtime]",
+    expect(realtimeEntries(log.mock.calls)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         event: "server_event_received",
         type: "GAME_STATE_SYNC",
         stateVersion: 4,
       }),
-    );
-    expect(log).toHaveBeenCalledWith(
-      "[parchis-realtime]",
       expect.objectContaining({
         event: "socket_closed",
         code: 1006,
         lastEventType: "GAME_STATE_SYNC",
         lastStateVersion: 4,
       }),
-    );
+    ]));
     expect(JSON.stringify(log.mock.calls)).not.toContain("player-token");
     expect(JSON.stringify(log.mock.calls)).not.toContain("AB7K2");
 
@@ -583,14 +584,69 @@ describe("WebSocket server-event validation", () => {
       result.current.sendChatMessage("secret chat text must not appear");
     });
 
-    expect(log).toHaveBeenCalledWith(
-      "[parchis-realtime]",
-      expect.objectContaining({ event: "client_command_sent", type: "CHAT_MESSAGE" }),
-    );
+    expect(realtimeEntries(log.mock.calls)).toContainEqual(expect.objectContaining({
+      event: "client_command_sent",
+      type: "CHAT_MESSAGE",
+    }));
     expect(JSON.stringify(log.mock.calls)).not.toContain("secret chat text must not appear");
     expect(JSON.stringify(log.mock.calls)).not.toContain("player-token");
     expect(JSON.stringify(log.mock.calls)).not.toContain("AB7K2");
 
+    unmount();
+    window.history.replaceState({}, "", "/");
+    log.mockRestore();
+  });
+
+  it("correlates a sent command with the first matching server event and store apply", () => {
+    const socket = createFakeSocket();
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const requestId = "90f1e3d8-4817-4a2b-9b29-017d3f64f5a2";
+    vi.spyOn(crypto, "randomUUID").mockReturnValue(requestId);
+    createRoomSocketMock.mockReturnValue(socket as unknown as WebSocket);
+    useGameStore.getState().setSession({
+      roomCode: "AB7K2",
+      playerId: "p1",
+      playerToken: "player-token",
+      isHost: true,
+    });
+    window.history.replaceState({}, "", "/room/AB7K2?realtime-debug=1");
+
+    const { result, unmount } = renderHook(() => useGameSocket("AB7K2"));
+    act(() => {
+      socket.readyState = WebSocket.OPEN;
+      socket.onopen?.(new Event("open"));
+      socket.onmessage?.({ data: JSON.stringify(snapshotEvent) } as MessageEvent);
+      result.current.sendRollDice();
+      socket.onmessage?.({
+        data: JSON.stringify({
+          ...snapshotEvent,
+          eventId: "91c0523b-65fb-43d3-b0be-1b19fcd53f37",
+          requestId,
+        }),
+      } as MessageEvent);
+    });
+
+    expect(realtimeEntries(log.mock.calls)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: "client_command_sent",
+        type: "ROLL_DICE",
+        requestId,
+      }),
+      expect.objectContaining({
+        event: "server_event_received",
+        requestId,
+        eventId: "91c0523b-65fb-43d3-b0be-1b19fcd53f37",
+        commandAckMs: expect.any(Number),
+      }),
+      expect.objectContaining({
+        event: "server_event_applied",
+        requestId,
+        storeVersionBefore: 4,
+        storeVersionAfter: 4,
+        applyMs: expect.any(Number),
+      }),
+    ]));
+    expect(JSON.stringify(log.mock.calls)).not.toContain("player-token");
     unmount();
     window.history.replaceState({}, "", "/");
     log.mockRestore();

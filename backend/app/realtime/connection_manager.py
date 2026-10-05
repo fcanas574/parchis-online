@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from fastapi import WebSocket
 
 from app.game.models import SessionIdentity
-from app.realtime.diagnostics import diagnostic_id
+from app.realtime.diagnostics import diagnostic_id, diagnostic_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -151,12 +151,14 @@ class ConnectionManager:
                 if player_id != exclude_player_id
             ]
 
-        failed: list[ClientConnection] = []
-        for connection in targets:
-            failure = await self.send(connection, event)
-            if failure is not None:
-                failed.append(failure)
-        return failed
+        if len(targets) == 1:
+            failure = await self.send(targets[0], event)
+            return [failure] if failure is not None else []
+
+        results = await asyncio.gather(
+            *(self.send(connection, event) for connection in targets)
+        )
+        return [connection for connection in results if connection is not None]
 
     async def send(
         self,
@@ -178,7 +180,7 @@ class ConnectionManager:
                 else "none"
             )
             request_id = (
-                diagnostic_id(raw_request_id)
+                diagnostic_request_id(raw_request_id)
                 if isinstance(raw_request_id, str)
                 else "none"
             )
@@ -208,7 +210,7 @@ class ConnectionManager:
                 else "none"
             )
             request_id = (
-                diagnostic_id(raw_request_id)
+                diagnostic_request_id(raw_request_id)
                 if isinstance(raw_request_id, str)
                 else "none"
             )

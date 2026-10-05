@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -34,6 +35,28 @@ async def test_broadcast_sends_only_to_connections_in_room(manager, sockets):
 
     sockets[0].send_json.assert_awaited_once_with(event)
     sockets[1].send_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_sends_to_room_connections_concurrently(manager, sockets):
+    started_together = asyncio.Barrier(2)
+
+    async def wait_for_other_recipient(_event):
+        await started_together.wait()
+
+    first = ClientConnection(sockets[0], SessionIdentity("AB7K2", "p1"))
+    second = ClientConnection(sockets[1], SessionIdentity("AB7K2", "p2"))
+    await manager.add("AB7K2", first)
+    await manager.add("AB7K2", second)
+    for socket in sockets:
+        socket.send_json.side_effect = wait_for_other_recipient
+    event = make_event("PLAYER_READY", "AB7K2", 2, {"playerId": "p1"})
+
+    failed = await asyncio.wait_for(manager.broadcast("AB7K2", event), timeout=1)
+
+    assert failed == []
+    for socket in sockets:
+        socket.send_json.assert_awaited_once_with(event)
 
 
 @pytest.mark.asyncio

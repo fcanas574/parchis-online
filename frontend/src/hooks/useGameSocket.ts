@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useRef } from "react";
 import { readSession } from "@/lib/session";
 import { readPlayerPreferences } from "@/lib/player-preferences";
+import {
+  correlatableRequestId,
+  logRealtime,
+  realtimeDebugEnabled,
+} from "@/lib/realtime-diagnostics";
 import { createRoomSocket } from "@/lib/websocket";
 import { useGameStore } from "@/stores/gameStore";
 import type {
@@ -18,27 +23,11 @@ export { isServerEvent } from "@/types/protocol";
 
 const RETRY_DELAYS = [500, 1_000, 2_000, 4_000] as const;
 const API_ORIGIN = process.env.NEXT_PUBLIC_API_ORIGIN;
-type RealtimeDiagnosticDetails = Record<
-  string,
-  string | number | boolean | null
->;
-
-function logRealtime(
-  event: string,
-  details: RealtimeDiagnosticDetails,
-): void {
-  if (
-    typeof window === "undefined" ||
-    new URLSearchParams(window.location.search).get("realtime-debug") !== "1"
-  ) {
-    return;
-  }
-  console.info("[parchis-realtime]", {
-    event,
-    at: new Date().toISOString(),
-    ...details,
-  });
-}
+type PendingDiagnosticCommand = {
+  type: ClientCommand["type"];
+  sentAt: number;
+  timeoutId: number;
+};
 
 const isAuthenticationError = (event: ServerEvent) =>
   event.type === "ERROR" && event.payload.code === "UNAUTHENTICATED";
@@ -48,20 +37,67 @@ export function useGameSocket(roomCode: string) {
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryAttemptRef = useRef(0);
   const stopRetryingRef = useRef(false);
+  const pendingCommandsRef = useRef(new Map<string, PendingDiagnosticCommand>());
   const session = useGameStore((state) => state.session);
 
   const sendCommand = useCallback((command: ClientCommand) => {
     const socket = socketRef.current;
+    const requestId = "requestId" in command
+      ? correlatableRequestId(command.requestId)
+      : null;
     if (socket?.readyState !== WebSocket.OPEN) {
       logRealtime("client_command_not_sent", {
         type: command.type,
+        requestId,
         reason: "socket_not_open",
+        readyState: socket?.readyState ?? null,
       });
       return false;
     }
+    const sentAt = performance.now();
     socket.send(JSON.stringify(command));
-    logRealtime("client_command_sent", { type: command.type });
+    if (realtimeDebugEnabled() && requestId) {
+      if (pendingCommandsRef.current.size >= 64) {
+        const oldestId = pendingCommandsRef.current.keys().next().value;
+        if (oldestId) {
+          const oldest = pendingCommandsRef.current.get(oldestId);
+          if (oldest) window.clearTimeout(oldest.timeoutId);
+          pendingCommandsRef.current.delete(oldestId);
+        }
+      }
+      const timeoutId = window.setTimeout(() => {
+        const pending = pendingCommandsRef.current.get(requestId);
+        if (!pending) return;
+        pendingCommandsRef.current.delete(requestId);
+        logRealtime("client_command_no_ack", {
+          type: pending.type,
+          requestId,
+          waitMs: Math.round(performance.now() - pending.sentAt),
+          readyState: socket.readyState,
+        });
+      }, 10_000);
+      pendingCommandsRef.current.set(requestId, {
+        type: command.type,
+        sentAt,
+        timeoutId,
+      });
+    }
+    const state = useGameStore.getState();
+    logRealtime("client_command_sent", {
+      type: command.type,
+      requestId,
+      stateVersion: state.room?.stateVersion ?? state.lastStateVersion,
+      readyState: socket.readyState,
+      bufferedAmount: Number.isFinite(socket.bufferedAmount) ? socket.bufferedAmount : 0,
+    });
     return true;
+  }, []);
+
+  useEffect(() => () => {
+    for (const pending of pendingCommandsRef.current.values()) {
+      window.clearTimeout(pending.timeoutId);
+    }
+    pendingCommandsRef.current.clear();
   }, []);
 
   const sendReady = useCallback(
@@ -200,6 +236,35 @@ export function useGameSocket(roomCode: string) {
       return undefined;
     }
 
+    const onVisibilityChange = () => {
+      logRealtime("client_visibility_changed", {
+        visibility: document.visibilityState,
+      });
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    let longTaskObserver: PerformanceObserver | null = null;
+    if (
+      realtimeDebugEnabled() &&
+      typeof PerformanceObserver !== "undefined" &&
+      PerformanceObserver.supportedEntryTypes?.includes("longtask")
+    ) {
+      try {
+        longTaskObserver = new PerformanceObserver((entries) => {
+          for (const entry of entries.getEntries()) {
+            logRealtime("client_long_task", {
+              durationMs: Math.round(entry.duration),
+              startTimeMs: Math.round(entry.startTime),
+              visibility: document.visibilityState,
+            });
+          }
+        });
+        longTaskObserver.observe({ type: "longtask", buffered: true });
+      } catch {
+        longTaskObserver = null;
+      }
+    }
+
     stopRetryingRef.current = false;
     const clearRetryTimer = () => {
       if (retryTimerRef.current !== null) {
@@ -256,6 +321,20 @@ export function useGameSocket(roomCode: string) {
           const gapMs = lastServerEvent
             ? Math.round(receivedAt - lastServerEvent.receivedAt)
             : null;
+          const stateVersionDelta = lastServerEvent
+            ? event.stateVersion - lastServerEvent.stateVersion
+            : null;
+          const correlationId = correlatableRequestId(event.requestId);
+          const pendingCommand = correlationId
+            ? pendingCommandsRef.current.get(correlationId)
+            : undefined;
+          const commandAckMs = pendingCommand
+            ? Math.round(receivedAt - pendingCommand.sentAt)
+            : null;
+          if (correlationId && pendingCommand) {
+            window.clearTimeout(pendingCommand.timeoutId);
+            pendingCommandsRef.current.delete(correlationId);
+          }
           lastServerEvent = {
             type: event.type,
             stateVersion: event.stateVersion,
@@ -263,10 +342,30 @@ export function useGameSocket(roomCode: string) {
           };
           logRealtime("server_event_received", {
             type: event.type,
+            requestId: correlationId,
+            eventId: correlatableRequestId(event.eventId),
             stateVersion: event.stateVersion,
             gapMs,
+            stateVersionDelta,
+            commandAckMs,
+            readyState: socket.readyState,
           });
+          const storeBefore = useGameStore.getState();
+          const applyStartedAt = performance.now();
           store.applyEvent(event);
+          const applyDurationMs = performance.now() - applyStartedAt;
+          const storeAfter = useGameStore.getState();
+          logRealtime("server_event_applied", {
+            type: event.type,
+            requestId: correlationId,
+            eventId: correlatableRequestId(event.eventId),
+            stateVersion: event.stateVersion,
+            storeVersionBefore: storeBefore.lastStateVersion,
+            storeVersionAfter: storeAfter.lastStateVersion,
+            roomVersionBefore: storeBefore.room?.stateVersion ?? null,
+            roomVersionAfter: storeAfter.room?.stateVersion ?? null,
+            applyMs: Math.round(applyDurationMs * 100) / 100,
+          });
           if (socketRef.current === socket && event.type === "GAME_STATE_SYNC") {
             store.setConnectionState("connected");
             if (!cosmeticsSyncSent) {
@@ -334,6 +433,8 @@ export function useGameSocket(roomCode: string) {
     return () => {
       disposed = true;
       clearRetryTimer();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      longTaskObserver?.disconnect();
       if (socketRef.current) {
         socketRef.current.onopen = null;
         socketRef.current.onmessage = null;

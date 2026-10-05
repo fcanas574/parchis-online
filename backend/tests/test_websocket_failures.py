@@ -304,7 +304,7 @@ async def test_websocket_logs_connection_reconnect_and_close_code(
 
 
 @pytest.mark.asyncio
-async def test_websocket_logs_command_lifecycle_without_chat_or_request_contents(
+async def test_websocket_logs_correlatable_command_lifecycle_without_private_contents(
     room_manager: RoomManager,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -321,19 +321,21 @@ async def test_websocket_logs_command_lifecycle_without_chat_or_request_contents
         await socket.event("PLAYER_JOINED")
         await socket.event("GAME_STATE_SYNC")
         await socket.event("CHAT_HISTORY_SYNC")
+        request_id = "90f1e3d8-4817-4a2b-9b29-017d3f64f5a2"
         socket.command({
             "type": "CHAT_MESSAGE",
             "version": 1,
-            "requestId": "private-request-id",
+            "requestId": request_id,
             "text": "private chat contents must not be logged",
         })
         await socket.event("CHAT_MESSAGE")
 
     assert "realtime_ws_command_received" in caplog.text
     assert "realtime_ws_command_processed" in caplog.text
+    assert "realtime_ws_broadcast_completed" in caplog.text
     assert "command=CHAT_MESSAGE" in caplog.text
     assert "outcome=accepted" in caplog.text
-    assert "private-request-id" not in caplog.text
+    assert request_id in caplog.text
     assert "private chat contents must not be logged" not in caplog.text
     assert "AB7K2" not in caplog.text
     assert host.player_token not in caplog.text

@@ -2,6 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  correlatableRequestId,
+  logRealtime,
+} from "@/lib/realtime-diagnostics";
+import {
   advancePresentation,
   createPiecePresentation,
   receivePresentationEvent,
@@ -15,6 +19,14 @@ import type { ServerEvent } from "@/types/protocol";
 const STEP_DURATION_MS = 90;
 const MAX_ROUTE_DURATION_MS = 1_600;
 const MAX_HANDLED_EVENT_IDS = 256;
+
+type AnimationTrace = {
+  eventId: string;
+  stateVersion: number;
+  startedAt: number;
+  expectedDurationMs: number;
+  completedTicks: number;
+};
 
 function prefersReducedMotion(): boolean {
   return typeof window !== "undefined" &&
@@ -96,6 +108,7 @@ export function usePiecePresentation(
   const previousRoomRef = useRef(roomCode);
   const previousConnectionRef = useRef(connectionState);
   const animationTimerRef = useRef<number | null>(null);
+  const animationTraceRef = useRef<AnimationTrace | null>(null);
   const [reduceMotion, setReduceMotion] = useState(prefersReducedMotion);
   const isAnimating = presentation.queue.length > 0;
 
@@ -135,7 +148,33 @@ export function usePiecePresentation(
     for (const event of events) {
       if (handledEventsRef.current.has(event.eventId)) continue;
       handledEventsRef.current.add(event.eventId);
+      const previousVersion = next.lastVersion;
+      const previousQueueLength = next.queue.length;
+      const previousNeedsSync = next.needsSync;
       next = receivePresentationEvent(next, event);
+      if (event.type === "PIECE_MOVED" || event.type === "PIECE_CAPTURED") {
+        logRealtime("piece_presentation_event_processed", {
+          type: event.type,
+          eventId: event.eventId,
+          requestId: correlatableRequestId(event.requestId),
+          stateVersion: event.stateVersion,
+          previousVersion,
+          queueBefore: previousQueueLength,
+          queueAfter: next.queue.length,
+          queued: next.queue.some((step) => step.eventId === event.eventId),
+          needsSync: next.needsSync,
+        });
+      }
+      if (!previousNeedsSync && next.needsSync) {
+        logRealtime("piece_presentation_state_gap", {
+          type: event.type,
+          eventId: event.eventId,
+          requestId: correlatableRequestId(event.requestId),
+          previousVersion,
+          receivedVersion: event.stateVersion,
+          queueLength: next.queue.length,
+        });
+      }
     }
     if (handledEventsRef.current.size > MAX_HANDLED_EVENT_IDS) {
       const latestIds = events.slice(-MAX_HANDLED_EVENT_IDS).map((event) => event.eventId);
@@ -143,6 +182,27 @@ export function usePiecePresentation(
     }
     if (next !== presentationRef.current) commit(next);
   }, [connectionState, events, game, reduceMotion, roomCode, stateVersion]);
+
+  useEffect(() => {
+    if (
+      connectionState !== "connected" ||
+      presentation.queue.length > 0 ||
+      presentation.needsSync ||
+      presentation.lastVersion !== stateVersion
+    ) {
+      return;
+    }
+    const mismatchedPieces = game.pieces.filter((piece) =>
+      !positionMatchesPiece(presentation.visualPositions[piece.id], piece),
+    ).length;
+    if (mismatchedPieces > 0) {
+      logRealtime("piece_presentation_snapshot_mismatch", {
+        roomVersion: stateVersion,
+        presentationVersion: presentation.lastVersion,
+        mismatchedPieces,
+      });
+    }
+  }, [connectionState, game.pieces, presentation, stateVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -154,10 +214,58 @@ export function usePiecePresentation(
       const duration = activeStep.kind === "move"
         ? Math.min(STEP_DURATION_MS, MAX_ROUTE_DURATION_MS / activeStep.path.length)
         : STEP_DURATION_MS;
+      let trace = animationTraceRef.current;
+      if (!trace) {
+        trace = {
+          eventId: activeStep.eventId,
+          stateVersion: activeStep.stateVersion,
+          startedAt: performance.now(),
+          expectedDurationMs: 0,
+          completedTicks: 0,
+        };
+        animationTraceRef.current = trace;
+        logRealtime("piece_animation_started", {
+          eventId: trace.eventId,
+          stateVersion: trace.stateVersion,
+          queueLength: presentationRef.current.queue.length,
+        });
+      }
+      trace.expectedDurationMs += duration;
+      const tickStartedAt = performance.now();
       animationTimerRef.current = window.setTimeout(() => {
         animationTimerRef.current = null;
         if (cancelled) return;
+        const tickDurationMs = performance.now() - tickStartedAt;
+        trace!.completedTicks += 1;
+        if (tickDurationMs > duration + 150) {
+          logRealtime("piece_animation_tick_delayed", {
+            eventId: trace!.eventId,
+            stateVersion: trace!.stateVersion,
+            expectedMs: Math.round(duration),
+            actualMs: Math.round(tickDurationMs),
+            visibility: document.visibilityState,
+          });
+        }
         commit(advancePresentation(presentationRef.current));
+        if (presentationRef.current.queue.length === 0) {
+          const finishedTrace = animationTraceRef.current;
+          if (finishedTrace) {
+            const actualDurationMs = performance.now() - finishedTrace.startedAt;
+            logRealtime("piece_animation_completed", {
+              eventId: finishedTrace.eventId,
+              stateVersion: finishedTrace.stateVersion,
+              completedTicks: finishedTrace.completedTicks,
+              expectedMs: Math.round(finishedTrace.expectedDurationMs),
+              actualMs: Math.round(actualDurationMs),
+              delayedMs: Math.max(
+                0,
+                Math.round(actualDurationMs - finishedTrace.expectedDurationMs),
+              ),
+            });
+            animationTraceRef.current = null;
+          }
+          return;
+        }
         scheduleNextStep();
       }, duration);
     };
@@ -168,6 +276,18 @@ export function usePiecePresentation(
       if (animationTimerRef.current !== null) {
         window.clearTimeout(animationTimerRef.current);
         animationTimerRef.current = null;
+        const trace = animationTraceRef.current;
+        if (trace) {
+          logRealtime("piece_animation_interrupted", {
+            eventId: trace.eventId,
+            stateVersion: trace.stateVersion,
+            completedTicks: trace.completedTicks,
+            expectedMs: Math.round(trace.expectedDurationMs),
+            queueLength: presentationRef.current.queue.length,
+            visibility: document.visibilityState,
+          });
+          animationTraceRef.current = null;
+        }
       }
     };
   }, [connectionState, isAnimating, reduceMotion]);
